@@ -118,6 +118,19 @@ Git ignores `database\*.db`, `database\*.db-wal`, `database\*.db-shm`, `.env`, `
 
 Pytest uses synthetic fixtures and mocked responses. Tickers in those fixtures look like `TEST1`. Those rows are not market data, and the tests do not write them into `database\stock_market.db`.
 
-## Not in this stage
+## Random forest
 
-No machine learning, no model training, and no predictions screen. `requirements.txt` installs pytest, tzdata, websocket-client, streamlit, and plotly. The dashboard code does not import pandas or NumPy; Streamlit's installer brings those libraries in for its own widgets. scikit-learn, XGBoost, and TensorFlow are not installed. Wait for approval before any ML stage.
+This is the only model. It does not run when the dashboard opens. On the Random Forest page, **RUN RANDOM FOREST** builds one row per stock per trading day, then fits three forests for 1, 5, and 20 trading days.
+
+```text
+python -m machine_learning.supervised.random_forest.features
+python -m machine_learning.supervised.random_forest.train
+```
+
+Feature rows go to `machine_learning\exports\random_forest_features.csv`. Scores and forecasts go to `machine_learning\outputs` (`metrics.csv`, `predictions.csv`, and the shared `model_comparison.csv`). Those CSV files are gitignored. Training also inserts `model_runs` and `ml_predictions`.
+
+`requirements.txt` installs pandas, numpy, and scikit-learn for this model. XGBoost and TensorFlow are not installed.
+
+## Not built yet
+
+No XGBoost, LSTM, K-Means, PCA, or Isolation Forest. The recommendation window that will rank models has not been built. `model_comparison.csv` is the file it will read.

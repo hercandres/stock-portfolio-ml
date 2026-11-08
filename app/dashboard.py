@@ -1,8 +1,9 @@
 """Streamlit portfolio dashboard.
 
 Run with ``python -m streamlit run app/dashboard.py``. The Start Portfolio
-window owns the live IEX session. This process only reads SQLite and, when
-asked, runs the incremental catch-up. It does not train models.
+window owns the live IEX session. This process reads SQLite and, when asked,
+runs the incremental catch-up. The random forest runs only when the Random
+Forest page button is pressed.
 """
 
 from __future__ import annotations
@@ -44,6 +45,13 @@ from app.portfolio import (
 PAGE_PORTFOLIO = "Portfolio"
 PAGE_STOCK = "Stock"
 PAGE_DATABASE = "Database"
+PAGE_FOREST = "Random Forest"
+
+FOREST_EXPORT = ROOT / "machine_learning" / "exports" / "random_forest_features.csv"
+FOREST_METRICS = ROOT / "machine_learning" / "outputs" / "metrics.csv"
+FOREST_PREDICTIONS = ROOT / "machine_learning" / "outputs" / "predictions.csv"
+FOREST_BACKTEST = ROOT / "machine_learning" / "outputs" / "backtest.csv"
+FOREST_COMPARISON = ROOT / "machine_learning" / "outputs" / "model_comparison.csv"
 
 
 def database_path() -> Path:
@@ -64,7 +72,10 @@ def render(db_path: Path) -> None:
     state, banner = market_banner(now, latest)
     banner_class = "market-closed" if state == "closed" else "market-open"
     st.markdown(f'<div class="market-banner {banner_class}">{banner}</div>', unsafe_allow_html=True)
-    page = st.sidebar.radio("Section", [PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE])
+    page = st.sidebar.radio(
+        "Section",
+        [PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE, PAGE_FOREST],
+    )
     st.sidebar.caption(
         "IEX free tier. Historical catch-up skips about the latest 15 minutes. "
         "Trades and quotes are not stored."
@@ -76,6 +87,8 @@ def render(db_path: Path) -> None:
         _portfolio_page(db_path)
     elif page == PAGE_STOCK:
         _stock_page(db_path)
+    elif page == PAGE_FOREST:
+        _random_forest_page(db_path)
     else:
         _database_page(db_path, now)
 
@@ -302,6 +315,234 @@ def _database_page(db_path: Path, now: datetime) -> None:
         "Completed 1-minute bars update only while the Start Portfolio window is open. "
         "Trades and quotes are not written to the database."
     )
+
+
+def _read_table(path: Path):
+    import pandas as pd
+
+    if not path.is_file():
+        return None
+    return pd.read_csv(path)
+
+
+def _forest_symbols(db_path: Path) -> list[str]:
+    table = _read_table(FOREST_EXPORT)
+    if table is not None and "ticker" in table.columns:
+        symbols = sorted(str(symbol) for symbol in table["ticker"].dropna().unique())
+        if symbols:
+            return symbols
+    return [position.symbol for position in list_positions(db_path)]
+
+
+def _run_random_forest(db_path: Path) -> None:
+    """Build daily rows, then fit the three forests. Not called on page load."""
+    with st.spinner("Building daily rows and training the three forests..."):
+        from machine_learning.supervised.random_forest.features import build_and_save
+        from machine_learning.supervised.random_forest.train import train_and_save
+
+        try:
+            build_and_save(db_path)
+            train_and_save(db_path)
+        except Exception:
+            st.error("Random forest did not finish. No secret was printed.")
+            return
+    st.rerun()
+
+
+def _forest_explanation() -> None:
+    st.subheader("How the rows are built")
+    st.markdown(
+        "The database stores a price every minute. This model does not use those "
+        "minutes one by one. It keeps **one row per stock per trading day**: the "
+        "first price, the high, the low, the last price, and the day's volume."
+    )
+    st.markdown(
+        "Each number describes a day that has already finished. "
+        "**return_1d**, **return_5d**, and **return_20d** are the percent change "
+        "versus 1, 5, and 20 trading days ago. "
+        "**dist_sma_20_pct** and **dist_sma_50_pct** say how far today's close "
+        "sits from the 20-day and 50-day average, in percent. Above the average "
+        "is positive. "
+        "**rsi_14** compares the average up day with the average down day over "
+        "14 days, on a 0 to 100 scale. Higher means the recent days were mostly up. "
+        "**volatility_20d** is how widely the one-day percent changes have varied "
+        "over 20 days. "
+        "**volume_vs_20d** is today's volume divided by the average volume of the "
+        "last 20 days. 1.0 is a typical day. "
+        "**range_pct** is the day's high minus the low, divided by the close, in percent."
+    )
+    st.markdown(
+        "The three targets are the percent change 1, 5, and 20 trading days "
+        "in the future. Those are the answers. The forest is not given them as "
+        "inputs. The ticker and the date only name the row. The numbers are not "
+        "rescaled. A day missing one of the features is left out, which is why "
+        "the first 50 trading days drop: there is no 50-day average yet. A recent "
+        "day that does not yet have a 20-day future stays in the file, so the "
+        "forest can still make a forecast from it."
+    )
+    st.subheader("How the forest learns")
+    st.markdown(
+        "A random forest is a crowd of small decision trees. Each tree looks at "
+        "the features and guesses a percent change. The forest's guess is the "
+        "average of those trees. There are three forests, because the next day, "
+        "the next 5 days, and the next 20 days are different questions. Earlier "
+        "days teach the forest. Later days of the same stock are the score. The "
+        "rows are not shuffled. A shuffle would let the model study a day that "
+        "had not happened yet."
+    )
+    st.markdown(
+        "On the chart, **Actual** is the percent change that really happened on "
+        "the later days held out of training. **Predicted** is what that forest "
+        "guessed from the features known on each of those days. MAE is the average "
+        "size of the miss, in percentage points. RMSE is a similar miss that counts "
+        "a large error more heavily. Directional accuracy is how often the guess "
+        "and the real move had the same sign."
+    )
+
+
+def _forest_chart(symbol: str, horizon: str) -> None:
+    import plotly.graph_objects as go
+
+    table = _read_table(FOREST_BACKTEST)
+    if table is None:
+        st.info("Press RUN RANDOM FOREST to score the held-out days.")
+        return
+    rows = table[
+        (table["ticker"].astype(str) == symbol)
+        & (table["horizon"].astype(str) == str(horizon))
+    ].sort_values("date")
+    if rows.empty:
+        st.info("This stock has no held-out days for that horizon.")
+        return
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=rows["date"],
+            y=rows["actual_percent"],
+            name="Actual",
+            mode="lines+markers",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=rows["date"],
+            y=rows["predicted_percent"],
+            name="Predicted",
+            mode="lines+markers",
+        )
+    )
+    figure.update_layout(
+        title=f"{symbol}: predicted vs actual percent, {horizon} trading days",
+        xaxis_title="Date",
+        yaxis_title="Percent",
+        height=420,
+        margin=dict(l=40, r=20, t=50, b=40),
+        legend=dict(orientation="h"),
+    )
+    st.plotly_chart(figure, width="stretch")
+
+
+def _forest_metrics(horizon: str) -> None:
+    metrics = _read_table(FOREST_METRICS)
+    if metrics is None or "horizon" not in metrics.columns:
+        return
+    match = metrics[metrics["horizon"].astype(str) == str(horizon)]
+    if match.empty:
+        return
+    row = match.iloc[0]
+    mae_column, rmse_column, direction_column = st.columns(3)
+    mae_column.metric("MAE", f"{float(row['MAE']):.3f}")
+    rmse_column.metric("RMSE", f"{float(row['RMSE']):.3f}")
+    direction_column.metric(
+        "Directional accuracy",
+        f"{float(row['directional accuracy']):.1%}",
+    )
+
+
+def _forest_forecast(symbol: str, horizon: str) -> None:
+    predictions = _read_table(FOREST_PREDICTIONS)
+    if predictions is None:
+        st.write("This is a model estimate, not a trade.")
+        return
+    match = predictions[
+        (predictions["ticker"].astype(str) == symbol)
+        & (predictions["horizon"].astype(str) == str(horizon))
+    ]
+    if match.empty:
+        st.write("This is a model estimate, not a trade.")
+        return
+    row = match.iloc[0]
+    st.write(
+        f"Latest {horizon}-day forecast for {symbol}: "
+        f"{float(row['predicted percent']):.2f}% ({row['recommendation']}). "
+        "This is a model estimate, not a trade."
+    )
+
+
+def _forest_score_notes() -> None:
+    st.write(
+        "Lower MAE and RMSE are closer prices, and higher directional accuracy "
+        "means the up/down call was right more often."
+    )
+    st.write(
+        "The recommendation window will rank models from this file once the others exist."
+    )
+
+
+def _forest_comparison_table() -> None:
+    """Show this forest's three scores. Do not rank models that are absent."""
+    st.subheader("Scores")
+    table = _read_table(FOREST_COMPARISON)
+    if table is None or table.empty or "model" not in table.columns:
+        st.info("The comparison file is written when you run the forest.")
+        _forest_score_notes()
+        return
+    forest = table[table["model"].astype(str) == "random_forest"].copy()
+    if forest.empty:
+        st.info("Random forest has no rows in the comparison file yet.")
+        _forest_score_notes()
+        return
+    forest["horizon_days"] = forest["horizon_days"].astype(int)
+    forest = forest.sort_values("horizon_days")
+    show = {
+        "Horizon (days)": forest["horizon_days"].tolist(),
+        "MAE": [f"{float(value):.3f}" for value in forest["mae"]],
+        "RMSE": [f"{float(value):.3f}" for value in forest["rmse"]],
+        "Directional accuracy": [
+            f"{float(value):.1%}" for value in forest["directional_accuracy"]
+        ],
+        "Cutoff": [str(value) for value in forest["cutoff"]],
+    }
+    import pandas as pd
+
+    st.table(pd.DataFrame(show))
+    _forest_score_notes()
+
+
+def _random_forest_page(db_path: Path) -> None:
+    st.header("Random Forest")
+    st.caption("Opening this page does not train. The button is the only way it runs.")
+    symbols = _forest_symbols(db_path)
+    if symbols:
+        symbol = st.selectbox("Stock", symbols)
+    else:
+        symbol = None
+        st.selectbox("Stock", ["No feature rows yet"], disabled=True)
+    horizon = st.selectbox(
+        "Horizon",
+        ["1", "5", "20"],
+        format_func=lambda value: f"{value} trading days",
+    )
+    if st.button("RUN RANDOM FOREST"):
+        _run_random_forest(db_path)
+    _forest_explanation()
+    if symbol is not None:
+        _forest_chart(symbol, horizon)
+        _forest_metrics(horizon)
+        _forest_forecast(symbol, horizon)
+    else:
+        st.write("This is a model estimate, not a trade.")
+    _forest_comparison_table()
 
 
 def _style() -> None:

@@ -8,5 +8,10 @@ websocket-client>=1.8
 streamlit>=1.39
 plotly>=5.22
 
-# Later stages add these packages. Do not install them yet:
-# pandas, numpy, scikit-learn, xgboost, tensorflow
+# Random forest. These three are installed in the local virtual environment.
+pandas>=2.2
+numpy>=2.0
+scikit-learn>=1.5
+
+# Not installed. Other models are not part of this project yet.
+# xgboost, tensorflow
