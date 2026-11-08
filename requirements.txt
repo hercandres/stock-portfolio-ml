@@ -1,0 +1,5 @@
+# Stage 1 installs the test runner only.
+pytest>=8.4
+
+# Later stages add these packages. Do not install them in Stage 1:
+# pandas, numpy, scikit-learn, xgboost, tensorflow, streamlit, plotly
