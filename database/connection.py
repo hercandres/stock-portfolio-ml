@@ -25,6 +25,12 @@ INSERT INTO historical_prices (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
+_INSERT_PRICE_IGNORE_SQL = """
+INSERT OR IGNORE INTO historical_prices (
+    ticker, timestamp, open, high, low, close, volume, interval
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
 # Serializes writers inside this process. SQLite still enforces one writer
 # across processes; busy_timeout is set on each connection for that case.
 _write_lock = threading.Lock()
@@ -113,6 +119,25 @@ def insert_historical_prices(
     with transaction(connection):
         connection.executemany(_INSERT_PRICE_SQL, payload)
     return len(payload)
+
+
+def insert_historical_prices_ignoring_duplicates(
+    connection: sqlite3.Connection,
+    rows: Sequence[Sequence[object]],
+) -> int:
+    """Insert price rows and skip rows that repeat the unique key.
+
+    The unique key is still ``(ticker, timestamp, interval)``. A duplicate
+    is ignored. Any other failure rolls the batch back. Returns how many
+    rows were newly stored.
+    """
+    payload = tuple(_normalize_price_row(row) for row in rows)
+    if not payload:
+        return 0
+    with transaction(connection):
+        before = connection.total_changes
+        connection.executemany(_INSERT_PRICE_IGNORE_SQL, payload)
+        return int(connection.total_changes - before)
 
 
 def delete_historical_prices_before(

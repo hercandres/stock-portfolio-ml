@@ -1,5 +1,7 @@
-# Stage 1 installs the test runner only.
+# Stage 2 tests need pytest. tzdata supplies the New York time zone on Windows.
+# Alpaca historical bars use the Python standard library for HTTP.
 pytest>=8.4
+tzdata
 
-# Later stages add these packages. Do not install them in Stage 1:
+# Later stages add these packages. Do not install them yet:
 # pandas, numpy, scikit-learn, xgboost, tensorflow, streamlit, plotly
