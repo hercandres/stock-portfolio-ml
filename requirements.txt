@@ -1,7 +1,9 @@
-# Stage 2 tests need pytest. tzdata supplies the New York time zone on Windows.
-# Alpaca historical bars use the Python standard library for HTTP.
+# Tests need pytest. tzdata supplies the New York time zone on Windows.
+# Historical bars use the Python standard library for HTTP.
+# websocket-client is the foreground IEX stream. It is not a Windows service.
 pytest>=8.4
 tzdata
+websocket-client>=1.8
 
 # Later stages add these packages. Do not install them yet:
 # pandas, numpy, scikit-learn, xgboost, tensorflow, streamlit, plotly

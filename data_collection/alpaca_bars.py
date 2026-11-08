@@ -1,7 +1,8 @@
 """Alpaca historical 1-minute bars.
 
-Stage 2 calls ``GET /v2/stocks/{symbol}/bars`` only. It does not open a
-WebSocket and it does not request trades or quotes.
+Historical calls use ``GET /v2/stocks/{symbol}/bars`` only. This module
+does not open a WebSocket and does not request trades or quotes. The
+foreground IEX stream lives in ``data_collection.live_session``.
 
 The free Basic plan's real-time equity coverage is IEX, not the
 consolidated SIP feed. This client always sends ``feed=iex``. Historical
@@ -101,6 +102,77 @@ def history_window(now: datetime) -> tuple[datetime, datetime]:
     return start, end
 
 
+def missing_bar_window(
+    now: datetime,
+    latest_success: datetime | None,
+    newest_stored: datetime | None,
+) -> tuple[datetime, datetime] | None:
+    """Return the start and end of bars that are not synced yet.
+
+    A cursor, or any stored bar when the cursor is empty, requests only the
+    minutes after that timestamp. The 365-day window is used only when this
+    ticker has no stored history. ``None`` means the cursor is already through
+    the latest minute historical backfill is allowed to ask for.
+    """
+    full_start, end = history_window(now)
+    if latest_success is not None:
+        start = _floor_minute(latest_success) + timedelta(minutes=1)
+    elif newest_stored is not None:
+        start = _floor_minute(newest_stored) + timedelta(minutes=1)
+    else:
+        start = full_start
+    if start > end:
+        return None
+    return start, end
+
+
+def range_has_regular_session(start: datetime, end: datetime) -> bool:
+    """True when a weekday 09:30–16:00 ET minute falls inside the inclusive range."""
+    probe = _floor_minute(start)
+    end_minute = _floor_minute(end)
+    if probe > end_minute:
+        return False
+    steps = int((end_minute - probe).total_seconds() // 60) + 1
+    # A multi-week hole is worth one request even before walking every minute.
+    if steps > 20000:
+        return True
+    for _ in range(steps):
+        if is_regular_us_session(probe):
+            return True
+        probe += timedelta(minutes=1)
+    return False
+
+
+def is_contiguous_regular_bar(cursor: datetime | None, bar_time: datetime) -> bool:
+    """True when ``bar_time`` is the next regular-session minute after ``cursor``.
+
+    Weekends and overnight minutes are not a gap. A skipped weekday minute is.
+    """
+    started = _floor_minute(bar_time)
+    if not is_regular_us_session(started):
+        return False
+    if cursor is None:
+        return True
+    return _next_regular_minute(cursor) == started
+
+
+def live_bar_is_storable(started_at: datetime, now: datetime) -> bool:
+    """Keep a completed stream bar. The newest minutes are allowed.
+
+    Historical backfill still uses ``bar_is_storable``, which leaves out the
+    latest 15 minutes. The IEX stream is the free real-time source for those.
+    """
+    if started_at.tzinfo is None or now.tzinfo is None:
+        raise ValueError("timestamps must be timezone-aware")
+    started = started_at.astimezone(timezone.utc).replace(microsecond=0)
+    current = now.astimezone(timezone.utc)
+    if started.second != 0:
+        return False
+    if started > current + timedelta(minutes=1):
+        return False
+    return is_regular_us_session(started)
+
+
 def is_regular_us_session(started_at: datetime) -> bool:
     """True for a weekday bar that opens at or after 09:30 and before 16:00 ET."""
     local = started_at.astimezone(NEW_YORK)
@@ -150,6 +222,20 @@ class AlpacaBarsClient:
 
     def historical_minute_bars(self, symbol: str, now: datetime) -> BarFetch:
         start, end = history_window(now)
+        return self.minute_bars_between(symbol, start, end, now)
+
+    def minute_bars_between(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        now: datetime,
+    ) -> BarFetch:
+        """Download one inclusive IEX window. ``start`` after ``end`` calls nothing."""
+        start = _floor_minute(start)
+        end = _floor_minute(end)
+        if start > end:
+            return BarFetch(bars=(), raw_bar_count=0)
         page_token: str | None = None
         stored: list[MinuteBar] = []
         raw_bar_count = 0
@@ -273,9 +359,24 @@ def _floor_minute(value: datetime) -> datetime:
     return value.astimezone(timezone.utc).replace(second=0, microsecond=0)
 
 
+def _next_regular_minute(after: datetime) -> datetime:
+    probe = _floor_minute(after) + timedelta(minutes=1)
+    for _ in range(8 * 24 * 60):
+        if is_regular_us_session(probe):
+            return probe
+        probe += timedelta(minutes=1)
+    raise RuntimeError("no regular US session minute within 8 days")
+
+
 def _parse_bar_time(symbol: str, value: object) -> datetime:
     if not isinstance(value, str) or not value.endswith("Z"):
         raise AlpacaResponseError(f"{symbol}: bar timestamp must be UTC text ending in Z")
+    if "." in value:
+        head, fraction = value[:-1].split(".", 1)
+        if fraction != "" and set(fraction) <= {"0"}:
+            value = head + "Z"
+        else:
+            raise AlpacaResponseError(f"{symbol}: minute bar timestamp is not aligned to a minute")
     try:
         parsed = datetime.fromisoformat(value[:-1] + "+00:00")
     except ValueError as exc:

@@ -109,14 +109,14 @@ def _sync_one(
         fetched = client.historical_minute_bars(symbol, now)
     except Exception as exc:
         message = _public_error(exc)
-        _write_status(db_path, symbol, "error", None, message, now)
+        record_sync_status(db_path, symbol, "error", None, message, now)
         return SymbolSync(symbol, "error", 0, None, message)
     if not fetched.bars:
         if fetched.raw_bar_count == 0:
             message = "Alpaca returned no 1-minute bars for this window."
         else:
             message = "Alpaca returned bars, but none were completed regular-session minutes."
-        _write_status(db_path, symbol, "empty", None, message, now)
+        record_sync_status(db_path, symbol, "empty", None, message, now)
         return SymbolSync(symbol, "empty", 0, None, message)
     try:
         with get_connection(db_path) as connection:
@@ -126,15 +126,15 @@ def _sync_one(
             )
     except Exception as exc:
         message = _public_error(exc)
-        _write_status(db_path, symbol, "error", None, message, now)
+        record_sync_status(db_path, symbol, "error", None, message, now)
         return SymbolSync(symbol, "error", 0, None, message)
     latest = max(bar.timestamp for bar in fetched.bars)
     message = f"Saved {inserted} new 1-minute bars."
-    _write_status(db_path, symbol, "success", latest, None, now)
+    record_sync_status(db_path, symbol, "success", latest, None, now)
     return SymbolSync(symbol, "success", inserted, latest, message)
 
 
-def _write_status(
+def record_sync_status(
     db_path: Path,
     symbol: str,
     status: str,

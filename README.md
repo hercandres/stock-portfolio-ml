@@ -1,6 +1,6 @@
 # Stock Portfolio ML
 
-Stage 2 stores a local SQLite database and can download completed historical 1-minute bars for 25 monitored stocks. The dashboard, streaming, retention scheduler, and machine learning are not started. Wait for approval before Stage 3.
+Stage 3 stores a local SQLite database, catches up missing IEX 1-minute bars, and can keep a live IEX stream open only while that Python process is running. The dashboard and machine learning are not started. Wait for approval before Stage 4.
 
 The database file stays on this PC. It is not committed. Secrets stay out of git. `.env.example` lists Alpaca variable names only.
 
@@ -18,7 +18,7 @@ Seeding sets `is_monitored` to 1 and the regular US session (`America/New_York`,
 
 SQLite only, in `database\stock_market.db`. `historical_prices` keeps one row per completed OHLCV bar. The interval stored for these downloads is `1m`. There is no CSV store and no CSV export.
 
-A later collection target is still about 25 symbols, 365 days of 1-minute bars, and a cap around 5 GB. Stage 2 requests that 365-day window from Alpaca but does not schedule retention.
+The collection target is about 25 symbols, 365 days of 1-minute bars, and a cap around 5 GB. Retention deletes `historical_prices` rows older than 365 calendar days when an incremental sync or a live session runs. It logs the database file size and warns if that file exceeds 4 GB. It does not delete newer rows to chase the cap.
 
 ## Alpaca
 
@@ -26,7 +26,13 @@ Stage 2 calls the historical bars endpoint only:
 
 `GET https://data.alpaca.markets/v2/stocks/{symbol}/bars`
 
-The request uses `timeframe=1Min`, `feed=iex`, and `adjustment=split`. Free Basic access is IEX, not consolidated real-time SIP. The client does not open a WebSocket and does not download trades or quotes. The latest 15 minutes are left out of each request. Basic historical minute data goes back to 2016, so a 365-day window is inside the published history, limited to minutes IEX actually printed.
+The request uses `timeframe=1Min`, `feed=iex`, and `adjustment=split`. Free Basic access is IEX, not consolidated real-time SIP. Historical requests leave out the latest 15 minutes and stay under 200 calls per minute. They do not ask for SIP, OTC, trades, or quotes.
+
+`python -m data_collection.sync_history` is the full 365-day download. `python -m data_collection.incremental` asks only for minutes after `sync_status.latest_success_timestamp`. If that cursor is empty but bars are already stored, the next request starts after the newest stored bar. A weekend, holiday, or closed market is success with nothing new. One ticker's failure does not stop the others.
+
+The live session uses `wss://stream.data.alpaca.markets/v2/iex` for the 25 symbols. It subscribes to completed minute bars and quotes. Only a completed bar is written. Quotes stay in memory. Trades are not subscribed and are not stored. A dropped socket reconnects, then the incremental sync fills minutes the stream missed. Authentication failure stops the session instead of retrying.
+
+Collection runs only inside this process. There is no Windows service, startup task, or scheduler. `python -m data_collection.live_session` blocks in the foreground. Ctrl+C, or closing that window, stops the socket and the catch-up loop. Stage 4 will call the same start and stop from the dashboard.
 
 Docs: https://docs.alpaca.markets/us/docs/about-market-data-api
 
@@ -48,8 +54,12 @@ py -3 -m venv .venv
 .\.venv\Scripts\python.exe -m database.initialize
 .\.venv\Scripts\python.exe -m data_collection.seed
 .\.venv\Scripts\python.exe -m data_collection.sync_history
+.\.venv\Scripts\python.exe -m data_collection.incremental
+.\.venv\Scripts\python.exe -m data_collection.live_session
 .\.venv\Scripts\python.exe -m pytest
 ```
+
+`python -m data_collection.live_session` keeps running until Ctrl+C. Do not leave it open after a test. Pytest uses mocks and does not start it.
 
 Command Prompt:
 
@@ -60,6 +70,8 @@ py -3 -m venv .venv
 .venv\Scripts\python.exe -m database.initialize
 .venv\Scripts\python.exe -m data_collection.seed
 .venv\Scripts\python.exe -m data_collection.sync_history
+.venv\Scripts\python.exe -m data_collection.incremental
+.venv\Scripts\python.exe -m data_collection.live_session
 .venv\Scripts\python.exe -m pytest
 ```
 
@@ -67,7 +79,11 @@ py -3 -m venv .venv
 
 `python -m data_collection.seed` upserts the 25 symbols.
 
-`python -m data_collection.sync_history` seeds, then downloads only when both Alpaca keys are present. If either key is missing it prints the missing names and does not call Alpaca. A failure or an empty response for one ticker is written to `sync_status` and the other tickers continue.
+`python -m data_collection.sync_history` seeds, then downloads a full year only when both Alpaca keys are present. If either key is missing it prints the missing names and does not call Alpaca. A failure or an empty response for one ticker is written to `sync_status` and the other tickers continue.
+
+`python -m data_collection.incremental` is the catch-up command. It does not repeat a full year when a ticker already has a success cursor or stored bars. It prints how many new rows were inserted, how many old rows retention deleted, and the database file size. It then exits.
+
+`python -m data_collection.live_session` runs that catch-up and then the IEX stream in the foreground. Stop it with Ctrl+C. The process should not still be running afterward.
 
 These commands were run on this PC with Python 3.14. They call the virtual environment's Python directly.
 
@@ -82,7 +98,7 @@ These commands were run on this PC with Python 3.14. They call the virtual envir
 - Repeat downloads skip rows that already have the same ticker, timestamp, and interval
 - `backup_database` copies the file with the SQLite backup API
 - `database_file_size` returns the main database file size in bytes
-- `delete_historical_prices_before` can delete old `historical_prices` rows. Nothing schedules it.
+- `delete_historical_prices_before` deletes `historical_prices` rows strictly older than a cutoff. Incremental sync and the live session call it for a 365-day cutoff. Nothing outside the process schedules it.
 
 Git ignores `database\*.db`, `database\*.db-wal`, `database\*.db-shm`, `.env`, `.venv\`, `__pycache__\`, and `.pytest_cache\`.
 
@@ -92,4 +108,4 @@ Pytest uses synthetic fixtures and mocked HTTP responses. Tickers in those fixtu
 
 ## Not in this stage
 
-No Streamlit dashboard, no WebSocket stream, no retention scheduler, and no machine learning. `requirements.txt` installs pytest and tzdata (the New York time zone database used to keep the regular US session). Pandas, NumPy, scikit-learn, XGBoost, TensorFlow, Streamlit, and Plotly are named for later stages and are not installed.
+No Streamlit dashboard and no machine learning. `requirements.txt` installs pytest, tzdata (the New York time zone database), and websocket-client. Pandas, NumPy, scikit-learn, XGBoost, TensorFlow, Streamlit, and Plotly are named for later stages and are not installed. Wait for approval before Stage 4.
