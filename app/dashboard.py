@@ -178,6 +178,56 @@ def _holdings_table(positions: list, total_value: float) -> None:
     st.markdown("".join(lines))
 
 
+_CHART_NOTES: tuple[tuple[str, str], ...] = (
+    (
+        "Price",
+        "Each candlestick on the top panel is one slice of time. "
+        "The thick body runs from the first price in that slice to the last price: green if it closed higher than it opened, red if it closed lower. "
+        "The thin lines above and below are the highest and lowest prices reached. "
+        "A tall candle means the price moved a lot. A short one means it barely moved.",
+    ),
+    (
+        "Volume",
+        "Volume, in the panel of that name, is how many shares traded during that same slice. "
+        "A tall bar means more shares changed hands. A short bar means trading was quiet. "
+        "Green bars line up with a candle that closed higher, and red bars line up with one that closed lower. "
+        "A large price jump on a tall bar had more trading behind it than the same jump on a short bar.",
+    ),
+    (
+        "SMA 20 and SMA 50",
+        "A moving average is the average closing price over a run of candles, drawn as a smooth line on the price panel. "
+        "SMA 20 uses the last 20 candles, so it follows the price more quickly. SMA 50 uses the last 50, so it moves more slowly. "
+        "Price above both lines means the recent stretch has been rising. Price below both means it has been falling. "
+        "When the quicker SMA 20 crosses the slower SMA 50, the shorter trend has changed direction against the longer one.",
+    ),
+    (
+        "Bollinger upper and Bollinger lower",
+        "These dotted lines on the price panel mark a typical high and a typical low for the recent candles. "
+        "Bollinger upper is the high side of that range, and Bollinger lower is the low side. "
+        "Wide apart means the price has been swinging. Close together means it has been calm. "
+        "A candle on the upper line is high compared with recent prices, and one on the lower line is low. That only describes where it sits, not the next move.",
+    ),
+    (
+        "VWAP",
+        "VWAP is the average price people paid, giving more weight to candles where more shares traded. "
+        "It is the line labeled VWAP on the price panel. On the intraday ranges it starts over each trading session. On the daily ranges it runs across the days in view. "
+        "Price above VWAP means the latest price is higher than that average. Price below it means the latest price is lower.",
+    ),
+    (
+        "RSI",
+        "RSI, in the panel labeled RSI 14, is a score from 0 to 100 for whether recent candles were mostly gains or mostly losses. The 14 means it looks at the last 14 candles. "
+        "Up near the dotted line at 70, recent candles were mostly rising. Down near the dotted line at 30, they were mostly falling. "
+        "Near the middle, around 50, gains and losses have been about even. The score describes that recent stretch, not the next price.",
+    ),
+    (
+        "MACD, Signal, and Histogram",
+        "MACD compares a faster average of the price with a slower one. The MACD line is the gap between them, and Signal is a smoothed copy of that line. "
+        "MACD above Signal means the faster average is pulling ahead, which usually goes with prices pushing up. MACD below Signal means it is lagging, which usually goes with prices pushing down. "
+        "The Histogram bars draw that same gap: above zero when MACD is above Signal, below zero when it is not. Taller bars mean a wider gap.",
+    ),
+)
+
+
 def _stock_page(db_path: Path) -> None:
     st.header("Stock")
     positions = list_positions(db_path)
@@ -215,6 +265,9 @@ def _stock_page(db_path: Path) -> None:
         "SMA 20, SMA 50, Bollinger Bands, and VWAP are on the price panel. "
         "RSI and MACD use the same candles. Daily ranges use one candle per session."
     )
+    st.subheader("How to read this chart")
+    for title, body in _CHART_NOTES:
+        st.markdown(f"**{title}.** {body}")
 
 
 def _database_page(db_path: Path, now: datetime) -> None:
