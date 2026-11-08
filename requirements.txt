@@ -5,5 +5,8 @@ pytest>=8.4
 tzdata
 websocket-client>=1.8
 
+streamlit>=1.39
+plotly>=5.22
+
 # Later stages add these packages. Do not install them yet:
-# pandas, numpy, scikit-learn, xgboost, tensorflow, streamlit, plotly
+# pandas, numpy, scikit-learn, xgboost, tensorflow

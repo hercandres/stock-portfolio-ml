@@ -1,6 +1,6 @@
 # Stock Portfolio ML
 
-Stage 3 stores a local SQLite database, catches up missing IEX 1-minute bars, and can keep a live IEX stream open only while that Python process is running. The dashboard and machine learning are not started. Wait for approval before Stage 4.
+Stage 4 opens a Streamlit dashboard and, while that Start Portfolio window is open, runs the IEX catch-up and live updates. Machine learning is not started. Wait for approval before any model stage.
 
 The database file stays on this PC. It is not committed. Secrets stay out of git. `.env.example` lists Alpaca variable names only.
 
@@ -32,7 +32,7 @@ The request uses `timeframe=1Min`, `feed=iex`, and `adjustment=split`. Free Basi
 
 The live session uses `wss://stream.data.alpaca.markets/v2/iex` for the 25 symbols. It subscribes to completed minute bars and quotes. Only a completed bar is written. Quotes stay in memory. Trades are not subscribed and are not stored. A dropped socket reconnects, then the incremental sync fills minutes the stream missed. Authentication failure stops the session instead of retrying.
 
-Collection runs only inside this process. There is no Windows service, startup task, or scheduler. `python -m data_collection.live_session` blocks in the foreground. Ctrl+C, or closing that window, stops the socket and the catch-up loop. Stage 4 will call the same start and stop from the dashboard.
+Collection runs only inside the Start Portfolio window. There is no Windows service, startup task, or scheduler. `python -m data_collection.live_session` still blocks in the foreground if you start it by itself. The normal way to open the app is to double-click `Start Portfolio.bat`.
 
 Docs: https://docs.alpaca.markets/us/docs/about-market-data-api
 
@@ -85,6 +85,18 @@ py -3 -m venv .venv
 
 `python -m data_collection.live_session` runs that catch-up and then the IEX stream in the foreground. Stop it with Ctrl+C. The process should not still be running afterward.
 
+## Dashboard
+
+Double-click `Start Portfolio.bat` in this folder, or the copy on the Desktop named `Start Portfolio.bat`. The window starts two processes: the Stage 3 live session (incremental catch-up, then the IEX stream) and the Streamlit dashboard. Closing that window stops both. It does not install a Windows service or a startup task, and it does not build an executable.
+
+The dashboard has three sections:
+
+- Portfolio: share count and purchase price for each monitored stock, saved in `portfolio_holdings`. Total value uses the latest stored close. Total invested, unrealized P/L, and allocation weights are shown there. Holdings stay separate from the watchlist.
+- Stock: latest stored price, daily percent change, volume, and a chart with candlesticks, volume, moving averages, RSI, MACD, Bollinger Bands, and VWAP. Choose the stock and the time range.
+- Database: monitored count, row count, latest sync timestamp, collection status, file size, and use against the 5 GB cap. The feed is labeled IEX and about 15 minutes delayed on historical catch-up.
+
+UPDATE MARKET DATA runs only the incremental catch-up. It does not download the full year again. A closed market still shows the latest stored bars, including Friday's session.
+
 These commands were run on this PC with Python 3.14. They call the virtual environment's Python directly.
 
 ## Database
@@ -104,8 +116,8 @@ Git ignores `database\*.db`, `database\*.db-wal`, `database\*.db-shm`, `.env`, `
 
 ## Tests
 
-Pytest uses synthetic fixtures and mocked HTTP responses. Tickers in those fixtures look like `TEST1`. Those rows are not market data.
+Pytest uses synthetic fixtures and mocked responses. Tickers in those fixtures look like `TEST1`. Those rows are not market data, and the tests do not write them into `database\stock_market.db`.
 
 ## Not in this stage
 
-No Streamlit dashboard and no machine learning. `requirements.txt` installs pytest, tzdata (the New York time zone database), and websocket-client. Pandas, NumPy, scikit-learn, XGBoost, TensorFlow, Streamlit, and Plotly are named for later stages and are not installed. Wait for approval before Stage 4.
+No machine learning, no model training, and no predictions screen. `requirements.txt` installs pytest, tzdata, websocket-client, streamlit, and plotly. The dashboard code does not import pandas or NumPy; Streamlit's installer brings those libraries in for its own widgets. scikit-learn, XGBoost, and TensorFlow are not installed. Wait for approval before any ML stage.
