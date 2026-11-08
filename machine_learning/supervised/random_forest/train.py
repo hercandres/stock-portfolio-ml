@@ -106,6 +106,57 @@ def _score(predicted: np.ndarray, actual: np.ndarray) -> tuple[float, float, flo
     return mae, rmse, directional
 
 
+def score_held_out(rows: pd.DataFrame) -> dict[str, float] | None:
+    """Score one set of held-out rows.
+
+    The page passes a single stock and horizon. The comparison file
+    stays the score for every stock together.
+    """
+    if rows is None or len(rows) == 0:
+        return None
+    predicted = rows["predicted_percent"].to_numpy(dtype=float)
+    actual = rows["actual_percent"].to_numpy(dtype=float)
+    if len(predicted) == 0:
+        return None
+    mae, rmse, directional = _score(predicted, actual)
+    return {
+        "mae": mae,
+        "rmse": rmse,
+        "directional_accuracy": directional,
+    }
+
+
+def per_stock_scores(rows: pd.DataFrame) -> pd.DataFrame:
+    """One score row per ticker, so the spread across stocks can be seen."""
+    empty = pd.DataFrame(columns=["ticker", "mae", "rmse", "directional_accuracy"])
+    if rows is None or len(rows) == 0 or "ticker" not in rows.columns:
+        return empty
+    records = []
+    for ticker, group in rows.groupby("ticker", sort=True):
+        scores = score_held_out(group)
+        if scores is None:
+            continue
+        records.append({"ticker": str(ticker), **scores})
+    if not records:
+        return empty
+    return pd.DataFrame(records)
+
+
+def score_spread(per_stock: pd.DataFrame) -> dict[str, float] | None:
+    """Sample standard deviation of each score across stocks.
+
+    One stock cannot have a spread. Two or more can. Divide by n-1
+    because this describes how the stocks differ from each other.
+    """
+    if per_stock is None or len(per_stock) < 2:
+        return None
+    return {
+        "mae": float(per_stock["mae"].std(ddof=1)),
+        "rmse": float(per_stock["rmse"].std(ddof=1)),
+        "directional_accuracy": float(per_stock["directional_accuracy"].std(ddof=1)),
+    }
+
+
 def fit_horizons(frame: pd.DataFrame) -> list[dict]:
     """Fit one forest per horizon and score it on the later days."""
     frame = frame.copy()

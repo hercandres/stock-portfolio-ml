@@ -27,8 +27,11 @@ from machine_learning.supervised.random_forest.train import (
     FEATURES,
     chronological_split,
     fit_horizons,
+    per_stock_scores,
     recommendation,
     replace_model_rows,
+    score_held_out,
+    score_spread,
     train_and_save,
 )
 
@@ -255,10 +258,56 @@ def test_train_writes_files_and_database_rows(tmp_path: Path) -> None:
     assert cutoff.endswith("T21:00:00Z")
 
 
+def test_held_out_scores_follow_the_selected_stock() -> None:
+    rows = pd.DataFrame(
+        {
+            "ticker": ["TEST1", "TEST1", "TEST2", "TEST2"],
+            "horizon": ["1", "1", "1", "5"],
+            "predicted_percent": [1.0, 1.0, 5.0, 1.0],
+            "actual_percent": [1.0, 3.0, 0.0, 1.0],
+        }
+    )
+    one_day = score_held_out(rows[(rows["ticker"] == "TEST1") & (rows["horizon"] == "1")])
+    other_stock = score_held_out(rows[(rows["ticker"] == "TEST2") & (rows["horizon"] == "1")])
+    other_horizon = score_held_out(rows[(rows["ticker"] == "TEST2") & (rows["horizon"] == "5")])
+    assert one_day is not None and other_stock is not None and other_horizon is not None
+    assert one_day["mae"] == 1.0
+    assert other_stock["mae"] == 5.0
+    assert other_horizon["mae"] == 0.0
+    assert one_day["directional_accuracy"] == 1.0
+    assert other_stock["directional_accuracy"] == 0.0
+
+
+def test_all_scores_pool_every_row_and_measure_stock_spread() -> None:
+    rows = pd.DataFrame(
+        {
+            "ticker": ["TEST1", "TEST1", "TEST2", "TEST2"],
+            "predicted_percent": [1.0, 1.0, 5.0, 5.0],
+            "actual_percent": [1.0, 3.0, 0.0, 0.0],
+        }
+    )
+    pooled = score_held_out(rows)
+    per_stock = per_stock_scores(rows)
+    spread = score_spread(per_stock)
+    assert pooled is not None and spread is not None
+    assert pooled["mae"] == 3.0
+    assert list(per_stock["ticker"]) == ["TEST1", "TEST2"]
+    assert spread["mae"] == float(np.std([1.0, 5.0], ddof=1))
+    assert score_spread(per_stock.iloc[:1]) is None
+
+
 def test_dashboard_explains_the_forest_and_does_not_rank_missing_models() -> None:
     text = (ROOT / "app" / "dashboard.py").read_text(encoding="utf-8")
     assert 'st.button("RUN RANDOM FOREST")' in text
     assert "This is a model estimate, not a trade." in text
+    assert '["All", *symbols]' in text
+    assert 'st.subheader(f"This stock: {symbol}")' in text
+    assert 'st.subheader("All stocks, this horizon")' in text
+    assert 'st.subheader("Comparison file")' in text
+    all_branch, single_branch = text.split('if symbol == "All":', 1)[1].split("else:", 1)
+    assert "_forest_normal_chart" in all_branch
+    assert "_forest_normal_chart" not in single_branch.split("def ", 1)[0]
+    assert "score_held_out" in text
     assert "Lower MAE and RMSE are closer prices" in text
     assert "rank models from this file once the others exist." in text
     assert "random_forest" in text

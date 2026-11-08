@@ -48,7 +48,6 @@ PAGE_DATABASE = "Database"
 PAGE_FOREST = "Random Forest"
 
 FOREST_EXPORT = ROOT / "machine_learning" / "exports" / "random_forest_features.csv"
-FOREST_METRICS = ROOT / "machine_learning" / "outputs" / "metrics.csv"
 FOREST_PREDICTIONS = ROOT / "machine_learning" / "outputs" / "predictions.csv"
 FOREST_BACKTEST = ROOT / "machine_learning" / "outputs" / "backtest.csv"
 FOREST_COMPARISON = ROOT / "machine_learning" / "outputs" / "model_comparison.csv"
@@ -396,21 +395,33 @@ def _forest_explanation() -> None:
         "guessed from the features known on each of those days. MAE is the average "
         "size of the miss, in percentage points. RMSE is a similar miss that counts "
         "a large error more heavily. Directional accuracy is how often the guess "
-        "and the real move had the same sign."
+        "and the real move had the same sign. All scores every held-out day for "
+        "the horizon you picked. One ticker scores only that stock. The comparison "
+        "file at the bottom does not follow the dropdown."
     )
+
+
+def _held_out_rows(symbol: str, horizon: str):
+    """Held-out rows for one horizon. All keeps every ticker."""
+    table = _read_table(FOREST_BACKTEST)
+    if table is None or "ticker" not in table.columns or "horizon" not in table.columns:
+        return None
+    rows = table[table["horizon"].astype(str) == str(horizon)]
+    if symbol != "All":
+        rows = rows[rows["ticker"].astype(str) == symbol]
+    if rows.empty or "date" not in rows.columns:
+        return rows
+    sort_columns = ["date"] if symbol != "All" else ["ticker", "date"]
+    return rows.sort_values(sort_columns)
 
 
 def _forest_chart(symbol: str, horizon: str) -> None:
     import plotly.graph_objects as go
 
-    table = _read_table(FOREST_BACKTEST)
-    if table is None:
+    rows = _held_out_rows(symbol, horizon)
+    if rows is None:
         st.info("Press RUN RANDOM FOREST to score the held-out days.")
         return
-    rows = table[
-        (table["ticker"].astype(str) == symbol)
-        & (table["horizon"].astype(str) == str(horizon))
-    ].sort_values("date")
     if rows.empty:
         st.info("This stock has no held-out days for that horizon.")
         return
@@ -442,21 +453,126 @@ def _forest_chart(symbol: str, horizon: str) -> None:
     st.plotly_chart(figure, width="stretch")
 
 
-def _forest_metrics(horizon: str) -> None:
-    metrics = _read_table(FOREST_METRICS)
-    if metrics is None or "horizon" not in metrics.columns:
-        return
-    match = metrics[metrics["horizon"].astype(str) == str(horizon)]
-    if match.empty:
-        return
-    row = match.iloc[0]
+def _format_score(value: float, spread: float | None, as_percent: bool) -> str:
+    if as_percent:
+        text = f"{value:.1%}"
+        if spread is not None:
+            text += f" ± {spread:.1%}"
+        return text
+    text = f"{value:.3f}"
+    if spread is not None:
+        text += f" ± {spread:.3f}"
+    return text
+
+
+def _show_three_scores(scores: dict[str, float], spread: dict[str, float] | None) -> None:
+    mae_spread = None if spread is None else spread["mae"]
+    rmse_spread = None if spread is None else spread["rmse"]
+    direction_spread = None if spread is None else spread["directional_accuracy"]
     mae_column, rmse_column, direction_column = st.columns(3)
-    mae_column.metric("MAE", f"{float(row['MAE']):.3f}")
-    rmse_column.metric("RMSE", f"{float(row['RMSE']):.3f}")
+    mae_column.metric("MAE", _format_score(scores["mae"], mae_spread, False))
+    rmse_column.metric("RMSE", _format_score(scores["rmse"], rmse_spread, False))
     direction_column.metric(
         "Directional accuracy",
-        f"{float(row['directional accuracy']):.1%}",
+        _format_score(scores["directional_accuracy"], direction_spread, True),
     )
+
+
+def _forest_all_metrics(horizon: str) -> None:
+    """Pooled scores for this horizon, plus how much the stocks differ."""
+    from machine_learning.supervised.random_forest.train import (
+        per_stock_scores,
+        score_held_out,
+        score_spread,
+    )
+
+    st.subheader("All stocks, this horizon")
+    st.caption(
+        f"Every held-out day for the {horizon}-day horizon is included. "
+        "The ± value is the standard deviation of that score from stock to stock."
+    )
+    rows = _held_out_rows("All", horizon)
+    if rows is None or rows.empty:
+        st.info("There are no held-out days for that horizon.")
+        return
+    scores = score_held_out(rows)
+    if scores is None:
+        st.info("There are no held-out days for that horizon.")
+        return
+    _show_three_scores(scores, score_spread(per_stock_scores(rows)))
+
+
+def _forest_normal_chart(horizon: str) -> None:
+    """Normal curves of the per-stock scores. Only the All choice uses this."""
+    import numpy as np
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    from machine_learning.supervised.random_forest.train import per_stock_scores
+
+    rows = _held_out_rows("All", horizon)
+    if rows is None or rows.empty:
+        return
+    per_stock = per_stock_scores(rows)
+    if per_stock.empty:
+        return
+    st.caption(
+        "Each bar counts stocks. The curve is a normal distribution with the "
+        "same average and spread. This chart is only shown for All."
+    )
+    titles = ("MAE", "RMSE", "Directional accuracy")
+    keys = ("mae", "rmse", "directional_accuracy")
+    figure = make_subplots(rows=1, cols=3, subplot_titles=titles)
+    for column, key in enumerate(keys, start=1):
+        values = per_stock[key].to_numpy(dtype=float)
+        figure.add_trace(
+            go.Histogram(
+                x=values,
+                histnorm="probability density",
+                showlegend=False,
+            ),
+            row=1,
+            col=column,
+        )
+        if len(values) < 2:
+            continue
+        center = float(np.mean(values))
+        spread = float(np.std(values, ddof=1))
+        if spread <= 0:
+            continue
+        xs = np.linspace(center - 3 * spread, center + 3 * spread, 80)
+        ys = np.exp(-0.5 * ((xs - center) / spread) ** 2) / (spread * np.sqrt(2 * np.pi))
+        figure.add_trace(
+            go.Scatter(x=xs, y=ys, mode="lines", name="Normal", showlegend=column == 1),
+            row=1,
+            col=column,
+        )
+    figure.update_layout(
+        title=f"Per-stock scores, {horizon} trading days",
+        height=380,
+        margin=dict(l=40, r=20, t=50, b=40),
+    )
+    st.plotly_chart(figure, width="stretch")
+
+
+def _forest_metrics(symbol: str, horizon: str) -> None:
+    """Three scores for this stock only. They follow the selectors."""
+    from machine_learning.supervised.random_forest.train import score_held_out
+
+    st.subheader(f"This stock: {symbol}")
+    st.caption(
+        f"MAE, RMSE, and directional accuracy for {symbol} only, "
+        f"over {horizon} trading days."
+    )
+    rows = _held_out_rows(symbol, horizon)
+    if rows is None or rows.empty:
+        st.info("This stock has no held-out days for that horizon.")
+        return
+    scores = score_held_out(rows)
+    if scores is None:
+        st.info("This stock has no held-out days for that horizon.")
+        return
+    _show_three_scores(scores, None)
 
 
 def _forest_forecast(symbol: str, horizon: str) -> None:
@@ -490,8 +606,12 @@ def _forest_score_notes() -> None:
 
 
 def _forest_comparison_table() -> None:
-    """Show this forest's three scores. Do not rank models that are absent."""
-    st.subheader("Scores")
+    """Saved scores from model_comparison.csv. This does not follow the dropdown."""
+    st.subheader("Comparison file")
+    st.caption(
+        "Saved scores for every stock and every horizon. "
+        "This table does not follow the stock dropdown."
+    )
     table = _read_table(FOREST_COMPARISON)
     if table is None or table.empty or "model" not in table.columns:
         st.info("The comparison file is written when you run the forest.")
@@ -523,11 +643,8 @@ def _random_forest_page(db_path: Path) -> None:
     st.header("Random Forest")
     st.caption("Opening this page does not train. The button is the only way it runs.")
     symbols = _forest_symbols(db_path)
-    if symbols:
-        symbol = st.selectbox("Stock", symbols)
-    else:
-        symbol = None
-        st.selectbox("Stock", ["No feature rows yet"], disabled=True)
+    symbol = st.selectbox("Stock", ["All", *symbols])
+    st.caption("All uses every stock. A ticker uses only that stock.")
     horizon = st.selectbox(
         "Horizon",
         ["1", "5", "20"],
@@ -536,12 +653,13 @@ def _random_forest_page(db_path: Path) -> None:
     if st.button("RUN RANDOM FOREST"):
         _run_random_forest(db_path)
     _forest_explanation()
-    if symbol is not None:
-        _forest_chart(symbol, horizon)
-        _forest_metrics(horizon)
-        _forest_forecast(symbol, horizon)
+    if symbol == "All":
+        _forest_all_metrics(horizon)
+        _forest_normal_chart(horizon)
     else:
-        st.write("This is a model estimate, not a trade.")
+        _forest_chart(symbol, horizon)
+        _forest_metrics(symbol, horizon)
+        _forest_forecast(symbol, horizon)
     _forest_comparison_table()
 
 
