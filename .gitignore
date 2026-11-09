@@ -35,6 +35,7 @@ build/
 # Generated feature tables and model outputs. Never commit them.
 machine_learning/exports/*.csv
 machine_learning/outputs/*.csv
+machine_learning/outputs/**/*.csv
 
 # Editor and OS files
 .idea/

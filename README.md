@@ -97,7 +97,7 @@ py -3 -m venv .venv
 
 Double-click `Start Portfolio.bat` in this folder, or the copy on the Desktop named `Start Portfolio.bat`. The window starts two processes: the Stage 3 live session (incremental catch-up, then the IEX stream) and the Streamlit dashboard. Closing that window stops both. It does not install a Windows service or a startup task, and it does not build an executable.
 
-The left sidebar keeps Portfolio, Stock, and Database at the top. Below them, **ML Methods** lists each model window. Random Forest is the only model there so far. A later model is added to that list and does not move the first three pages.
+The left sidebar keeps Portfolio, Stock, and Database at the top. Below them, **ML Methods** lists each model window. Random Forest and XGBoost are the model pages. A later model is added to that list and does not move the first three pages.
 
 The dashboard sections:
 
@@ -131,7 +131,7 @@ Pytest uses synthetic fixtures and mocked responses. Tickers in those fixtures l
 
 ## Random forest
 
-This is the only model. When the dashboard session starts, it reads `daily_prices` with pandas and fits three scikit-learn forests for 1, 5, and 20 trading days. **Run model** on the Random Forest page does that again. Minute bars are not the training rows.
+When the dashboard session starts, it reads `daily_prices` with pandas and fits three scikit-learn forests for 1, 5, and 20 trading days. **Run model** on the Random Forest page does that again. Minute bars are not the training rows.
 
 ```text
 python -m machine_learning.supervised.random_forest.features
@@ -140,8 +140,18 @@ python -m machine_learning.supervised.random_forest.train
 
 Feature rows go to `machine_learning\exports\random_forest_features.csv`. Scores and forecasts go to `machine_learning\outputs` (`metrics.csv`, `predictions.csv`, and the shared `model_comparison.csv`). Those CSV files are gitignored. Training also inserts `model_runs` and `ml_predictions`.
 
-`requirements.txt` installs pandas, numpy, and scikit-learn for this model. XGBoost and TensorFlow are not installed.
+`requirements.txt` installs pandas, numpy, and scikit-learn for this model.
+
+## XGBoost
+
+XGBoost uses the same feature file, `machine_learning\exports\random_forest_features.csv`. It does not write a second feature CSV. The nine inputs and the three targets are the same. Numbers are not rescaled. Each ticker is split by date, with no shuffle. One `XGBRegressor` is fit for 1, 5, and 20 trading days. A row without a 20-day target can still be a forecast. It is not used as an answer.
+
+```text
+python -m machine_learning.supervised.xgboost.train
+```
+
+Scores and forecasts go to `machine_learning\outputs\xgboost`. The shared `model_comparison.csv` keeps the `random_forest` rows. Training replaces only the `xgboost` rows. The **XGBoost** page is under ML Methods. It trains once when the app opens, and again from **Run XGBoost**.
 
 ## Not built yet
 
-No XGBoost, LSTM, K-Means, PCA, or Isolation Forest. The recommendation window that will rank models has not been built. `model_comparison.csv` is the file it will read.
+No LSTM, K-Means, PCA, or Isolation Forest. The recommendation window that will rank models has not been built. `model_comparison.csv` is the file it will read.

@@ -1,1 +1,1 @@
-"""Supervised models. Random forest is the one that is built."""
+"""Supervised models. Random forest and XGBoost are built."""

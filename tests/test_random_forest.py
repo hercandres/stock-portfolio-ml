@@ -315,6 +315,9 @@ def test_dashboard_explains_the_forest_and_does_not_rank_missing_models() -> Non
     assert "Lower MAE and RMSE are closer prices" in text
     assert "rank models from this file once the others exist." in text
     assert "random_forest" in text
-    # Absent models are not listed, scored, or ranked on this page.
-    for name in ("XGBoost", "LSTM", "K-Means", "Isolation Forest"):
+    forest_page = text.split("def _random_forest_page", 1)[1].split("def _xgboost_explanation", 1)[0]
+    assert "XGBoost" not in forest_page
+    assert "_forest_comparison_table()" in forest_page
+    # Models that are not built are not named anywhere in the dashboard.
+    for name in ("LSTM", "K-Means", "Isolation Forest"):
         assert name not in text

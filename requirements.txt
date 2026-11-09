@@ -8,10 +8,13 @@ websocket-client>=1.8
 streamlit>=1.39
 plotly>=5.22
 
-# Random forest. These three are installed in the local virtual environment.
+# Random forest and the shared feature table.
 pandas>=2.2
 numpy>=2.0
 scikit-learn>=1.5
 
+# XGBoost. Training uses XGBRegressor from this library.
+xgboost>=2.1
+
 # Not installed. Other models are not part of this project yet.
-# xgboost, tensorflow
+# tensorflow

@@ -3,8 +3,8 @@
 Run with ``python -m streamlit run app/dashboard.py``. The Start Portfolio
 window owns the live IEX session. While that window is open, minute bars
 append about once a minute and a finished day is written to daily prices.
-This process only reads SQLite. The random forest trains once when the
-dashboard session starts, and again only from Run model.
+This process only reads SQLite. Random forest and XGBoost each train once
+when the dashboard session starts, and again only from their own buttons.
 """
 
 from __future__ import annotations
@@ -45,15 +45,19 @@ PAGE_PORTFOLIO = "Portfolio"
 PAGE_STOCK = "Stock"
 PAGE_DATABASE = "Database"
 PAGE_FOREST = "Random Forest"
+PAGE_XGBOOST = "XGBoost"
 # The first three stay at the top of the sidebar. A new model is added to
 # ML_PAGES, so it shows under ML Methods and does not move those three.
 MAIN_PAGES = (PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE)
-ML_PAGES = (PAGE_FOREST,)
+ML_PAGES = (PAGE_FOREST, PAGE_XGBOOST)
 
 FOREST_EXPORT = ROOT / "machine_learning" / "exports" / "random_forest_features.csv"
 FOREST_PREDICTIONS = ROOT / "machine_learning" / "outputs" / "predictions.csv"
 FOREST_BACKTEST = ROOT / "machine_learning" / "outputs" / "backtest.csv"
 FOREST_COMPARISON = ROOT / "machine_learning" / "outputs" / "model_comparison.csv"
+# XGBoost reads FOREST_EXPORT. Its scores live in their own folder.
+XGB_PREDICTIONS = ROOT / "machine_learning" / "outputs" / "xgboost" / "predictions.csv"
+XGB_BACKTEST = ROOT / "machine_learning" / "outputs" / "xgboost" / "backtest.csv"
 
 
 def _sidebar_page() -> str:
@@ -112,15 +116,18 @@ def render(db_path: Path) -> None:
         "and a finished day is saved with the daily bars. "
         "The left chart button is daily prices. The right button is the last year of minutes. "
         "Closed nights, weekends, and holidays are left off both charts. "
-        "The random forest trains on the daily bars."
+        "Random forest and XGBoost train on the daily bars."
     )
     _train_forest_once(db_path)
+    _train_xgboost_once(db_path)
     if page == PAGE_PORTFOLIO:
         _portfolio_page(db_path)
     elif page == PAGE_STOCK:
         _stock_page(db_path)
     elif page == PAGE_FOREST:
         _random_forest_page(db_path)
+    elif page == PAGE_XGBOOST:
+        _xgboost_page(db_path)
     else:
         _database_page(db_path, now)
 
@@ -422,6 +429,29 @@ def _train_forest(db_path: Path) -> None:
             st.error("Random forest did not finish. No secret was printed.")
 
 
+def _train_xgboost_once(db_path: Path) -> None:
+    """Train XGBoost the first time this dashboard session starts."""
+    if st.session_state.get("xgboost_ran"):
+        return
+    st.session_state["xgboost_ran"] = True
+    _train_xgboost(db_path)
+
+
+def _train_xgboost(db_path: Path) -> None:
+    """Fit three XGBRegressor models on the shared feature CSV.
+
+    This does not write a second feature file and it does not replace
+    random_forest rows in the comparison file.
+    """
+    with st.spinner("Training XGBoost on the shared daily feature file..."):
+        from machine_learning.supervised.xgboost.train import train_and_save
+
+        try:
+            train_and_save(db_path)
+        except Exception:
+            st.error("XGBoost did not finish. No secret was printed.")
+
+
 def _forest_explanation() -> None:
     st.subheader("How the rows are built")
     st.markdown(
@@ -477,9 +507,9 @@ def _forest_explanation() -> None:
     )
 
 
-def _held_out_rows(symbol: str, horizon: str):
+def _held_out_rows(symbol: str, horizon: str, backtest_path: Path = FOREST_BACKTEST):
     """Held-out rows for one horizon. All keeps every ticker."""
-    table = _read_table(FOREST_BACKTEST)
+    table = _read_table(backtest_path)
     if table is None or "ticker" not in table.columns or "horizon" not in table.columns:
         return None
     rows = table[table["horizon"].astype(str) == str(horizon)]
@@ -491,10 +521,10 @@ def _held_out_rows(symbol: str, horizon: str):
     return rows.sort_values(sort_columns)
 
 
-def _forest_chart(symbol: str, horizon: str) -> None:
+def _forest_chart(symbol: str, horizon: str, backtest_path: Path = FOREST_BACKTEST) -> None:
     import plotly.graph_objects as go
 
-    rows = _held_out_rows(symbol, horizon)
+    rows = _held_out_rows(symbol, horizon, backtest_path)
     if rows is None:
         st.info("The model has not scored the held-out days yet.")
         return
@@ -554,7 +584,7 @@ def _show_three_scores(scores: dict[str, float], spread: dict[str, float] | None
     )
 
 
-def _forest_all_metrics(horizon: str) -> None:
+def _forest_all_metrics(horizon: str, backtest_path: Path = FOREST_BACKTEST) -> None:
     """Pooled scores for this horizon, plus how much the stocks differ."""
     from machine_learning.supervised.random_forest.train import (
         per_stock_scores,
@@ -567,7 +597,7 @@ def _forest_all_metrics(horizon: str) -> None:
         f"Every held-out day for the {horizon}-day horizon is included. "
         "The ± value is the standard deviation of that score from stock to stock."
     )
-    rows = _held_out_rows("All", horizon)
+    rows = _held_out_rows("All", horizon, backtest_path)
     if rows is None or rows.empty:
         st.info("There are no held-out days for that horizon.")
         return
@@ -578,7 +608,7 @@ def _forest_all_metrics(horizon: str) -> None:
     _show_three_scores(scores, score_spread(per_stock_scores(rows)))
 
 
-def _forest_normal_chart(horizon: str) -> None:
+def _forest_normal_chart(horizon: str, backtest_path: Path = FOREST_BACKTEST) -> None:
     """Normal curves of the per-stock scores. Only the All choice uses this."""
     import numpy as np
     import plotly.graph_objects as go
@@ -586,7 +616,7 @@ def _forest_normal_chart(horizon: str) -> None:
 
     from machine_learning.supervised.random_forest.train import per_stock_scores
 
-    rows = _held_out_rows("All", horizon)
+    rows = _held_out_rows("All", horizon, backtest_path)
     if rows is None or rows.empty:
         return
     per_stock = per_stock_scores(rows)
@@ -631,7 +661,7 @@ def _forest_normal_chart(horizon: str) -> None:
     st.plotly_chart(figure, width="stretch")
 
 
-def _forest_metrics(symbol: str, horizon: str) -> None:
+def _forest_metrics(symbol: str, horizon: str, backtest_path: Path = FOREST_BACKTEST) -> None:
     """Three scores for this stock only. They follow the selectors."""
     from machine_learning.supervised.random_forest.train import score_held_out
 
@@ -640,7 +670,7 @@ def _forest_metrics(symbol: str, horizon: str) -> None:
         f"MAE, RMSE, and directional accuracy for {symbol} only, "
         f"over {horizon} trading days."
     )
-    rows = _held_out_rows(symbol, horizon)
+    rows = _held_out_rows(symbol, horizon, backtest_path)
     if rows is None or rows.empty:
         st.info("This stock has no held-out days for that horizon.")
         return
@@ -651,8 +681,8 @@ def _forest_metrics(symbol: str, horizon: str) -> None:
     _show_three_scores(scores, None)
 
 
-def _forest_forecast(symbol: str, horizon: str) -> None:
-    predictions = _read_table(FOREST_PREDICTIONS)
+def _forest_forecast(symbol: str, horizon: str, predictions_path: Path = FOREST_PREDICTIONS) -> None:
+    predictions = _read_table(predictions_path)
     if predictions is None:
         st.write("This is a model estimate, not a trade.")
         return
@@ -681,8 +711,11 @@ def _forest_score_notes() -> None:
     )
 
 
-def _forest_comparison_table() -> None:
-    """Saved scores from model_comparison.csv. This does not follow the dropdown."""
+def _forest_comparison_table(model_name: str = "random_forest") -> None:
+    """Saved scores from model_comparison.csv. This does not follow the dropdown.
+
+    Only ``model_name`` is shown. Other models' rows stay in the file.
+    """
     st.subheader("Comparison file")
     st.caption(
         "Saved scores for every stock and every horizon. "
@@ -690,24 +723,24 @@ def _forest_comparison_table() -> None:
     )
     table = _read_table(FOREST_COMPARISON)
     if table is None or table.empty or "model" not in table.columns:
-        st.info("The comparison file is written when you run the forest.")
+        st.info("The comparison file is written when you run the model.")
         _forest_score_notes()
         return
-    forest = table[table["model"].astype(str) == "random_forest"].copy()
-    if forest.empty:
-        st.info("Random forest has no rows in the comparison file yet.")
+    chosen = table[table["model"].astype(str) == model_name].copy()
+    if chosen.empty:
+        st.info(f"{model_name} has no rows in the comparison file yet.")
         _forest_score_notes()
         return
-    forest["horizon_days"] = forest["horizon_days"].astype(int)
-    forest = forest.sort_values("horizon_days")
+    chosen["horizon_days"] = chosen["horizon_days"].astype(int)
+    chosen = chosen.sort_values("horizon_days")
     show = {
-        "Horizon (days)": forest["horizon_days"].tolist(),
-        "MAE": [f"{float(value):.3f}" for value in forest["mae"]],
-        "RMSE": [f"{float(value):.3f}" for value in forest["rmse"]],
+        "Horizon (days)": chosen["horizon_days"].tolist(),
+        "MAE": [f"{float(value):.3f}" for value in chosen["mae"]],
+        "RMSE": [f"{float(value):.3f}" for value in chosen["rmse"]],
         "Directional accuracy": [
-            f"{float(value):.1%}" for value in forest["directional_accuracy"]
+            f"{float(value):.1%}" for value in chosen["directional_accuracy"]
         ],
-        "Cutoff": [str(value) for value in forest["cutoff"]],
+        "Cutoff": [str(value) for value in chosen["cutoff"]],
     }
     import pandas as pd
 
@@ -738,6 +771,77 @@ def _random_forest_page(db_path: Path) -> None:
         _forest_metrics(symbol, horizon)
         _forest_forecast(symbol, horizon)
     _forest_comparison_table()
+
+
+def _xgboost_explanation() -> None:
+    st.subheader("How the rows are built")
+    st.markdown(
+        "XGBoost reads the same file as the random forest: "
+        "**random_forest_features.csv**. That file is built from **daily_prices**, "
+        "one row per stock per trading day. There is no second feature file. "
+        "The nine inputs are **return_1d**, **return_5d**, **return_20d**, "
+        "**dist_sma_20_pct**, **dist_sma_50_pct**, **rsi_14**, **volatility_20d**, "
+        "**volume_vs_20d**, and **range_pct**. They describe a day that has "
+        "already finished. The numbers are not rescaled."
+    )
+    st.markdown(
+        "The targets are **target_1d**, **target_5d**, and **target_20d**: the "
+        "percent change 1, 5, and 20 trading days ahead. Those are the answers. "
+        "The booster is not given them as inputs. The ticker and the date only "
+        "name the row. A day missing a feature is left out. A recent day that "
+        "does not yet have a 20-day future stays in the file, so the booster "
+        "can still forecast from it. That row is not used as an answer."
+    )
+    st.subheader("How the booster learns")
+    st.markdown(
+        "XGBoost adds one small tree at a time. Each new tree tries to correct "
+        "the mistakes of the trees already added. The library model is "
+        "**XGBRegressor**. There are three boosters, because the next day, the "
+        "next 5 days, and the next 20 days are different questions. Earlier days "
+        "teach the booster. Later days of the same stock are the score. The rows "
+        "are not shuffled. A shuffle would let the model study a day that had "
+        "not happened yet."
+    )
+    st.markdown(
+        "On the chart, **Actual** is the percent change that really happened on "
+        "the later days held out of training. **Predicted** is what that booster "
+        "guessed from the features known on each of those days. MAE is the average "
+        "size of the miss, in percentage points. RMSE is a similar miss that counts "
+        "a large error more heavily. Directional accuracy is how often the guess "
+        "and the real move had the same sign. All scores every held-out day for "
+        "the horizon you picked. One ticker scores only that stock. The ± value "
+        "and the normal chart are only for All. The comparison file at the bottom "
+        "shows the xgboost rows and does not follow the dropdown."
+    )
+
+
+def _xgboost_page(db_path: Path) -> None:
+    st.header("XGBoost")
+    st.caption(
+        "The same daily feature file as the random forest. "
+        "The booster is XGBRegressor. It already ran when the app opened."
+    )
+    symbols = _forest_symbols(db_path)
+    symbol = st.selectbox("Stock", ["All", *symbols], key="xgb-stock")
+    st.caption("All uses every stock. A ticker uses only that stock.")
+    horizon = st.selectbox(
+        "Horizon",
+        ["1", "5", "20"],
+        format_func=lambda value: f"{value} trading days",
+        key="xgb-horizon",
+    )
+    if st.button("Run XGBoost"):
+        _train_xgboost(db_path)
+        st.rerun()
+    _xgboost_explanation()
+    if symbol == "All":
+        _forest_all_metrics(horizon, XGB_BACKTEST)
+        _forest_normal_chart(horizon, XGB_BACKTEST)
+    else:
+        _forest_chart(symbol, horizon, XGB_BACKTEST)
+        _forest_metrics(symbol, horizon, XGB_BACKTEST)
+        _forest_forecast(symbol, horizon, XGB_PREDICTIONS)
+    _forest_comparison_table("xgboost")
 
 
 def _style() -> None:

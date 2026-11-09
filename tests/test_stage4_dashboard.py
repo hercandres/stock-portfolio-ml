@@ -287,7 +287,7 @@ def test_stock_figure_uses_stored_candles() -> None:
 def test_sidebar_keeps_the_first_pages_above_ml_methods() -> None:
     text = (ROOT / "app" / "dashboard.py").read_text(encoding="utf-8")
     assert "MAIN_PAGES = (PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE)" in text
-    assert "ML_PAGES = (PAGE_FOREST,)" in text
+    assert "ML_PAGES = (PAGE_FOREST, PAGE_XGBOOST)" in text
     assert 'st.sidebar.subheader("ML Methods")' in text
     assert "[PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE, PAGE_FOREST]" not in text
     sidebar = text.split("def _sidebar_page", 1)[1].split("def _nav_button", 1)[0]
