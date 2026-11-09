@@ -45,11 +45,47 @@ PAGE_PORTFOLIO = "Portfolio"
 PAGE_STOCK = "Stock"
 PAGE_DATABASE = "Database"
 PAGE_FOREST = "Random Forest"
+# The first three stay at the top of the sidebar. A new model is added to
+# ML_PAGES, so it shows under ML Methods and does not move those three.
+MAIN_PAGES = (PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE)
+ML_PAGES = (PAGE_FOREST,)
 
 FOREST_EXPORT = ROOT / "machine_learning" / "exports" / "random_forest_features.csv"
 FOREST_PREDICTIONS = ROOT / "machine_learning" / "outputs" / "predictions.csv"
 FOREST_BACKTEST = ROOT / "machine_learning" / "outputs" / "backtest.csv"
 FOREST_COMPARISON = ROOT / "machine_learning" / "outputs" / "model_comparison.csv"
+
+
+def _sidebar_page() -> str:
+    """Portfolio, Stock, and Database stay above the model list.
+
+    The highlighted name is the open window. Later models are names in
+    ``ML_PAGES`` and appear under ML Methods.
+    """
+    if "nav_page" not in st.session_state:
+        st.session_state["nav_page"] = PAGE_PORTFOLIO
+    current = st.session_state["nav_page"]
+    if current not in MAIN_PAGES and current not in ML_PAGES:
+        current = PAGE_PORTFOLIO
+        st.session_state["nav_page"] = current
+    for name in MAIN_PAGES:
+        _nav_button(name, current)
+    st.sidebar.subheader("ML Methods")
+    for name in ML_PAGES:
+        _nav_button(name, current)
+    return st.session_state["nav_page"]
+
+
+def _nav_button(name: str, current: str) -> None:
+    """One sidebar window. The open window is the filled button."""
+    if st.sidebar.button(
+        name,
+        key=f"nav-{name}",
+        type="primary" if name == current else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state["nav_page"] = name
+        st.rerun()
 
 
 def database_path() -> Path:
@@ -70,10 +106,7 @@ def render(db_path: Path) -> None:
     state, banner = market_banner(now, latest)
     banner_class = "market-closed" if state == "closed" else "market-open"
     st.markdown(f'<div class="market-banner {banner_class}">{banner}</div>', unsafe_allow_html=True)
-    page = st.sidebar.radio(
-        "Section",
-        [PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE, PAGE_FOREST],
-    )
+    page = _sidebar_page()
     st.sidebar.caption(
         "While this window is open, minute bars append about once a minute "
         "and a finished day is saved with the daily bars. "

@@ -97,7 +97,9 @@ py -3 -m venv .venv
 
 Double-click `Start Portfolio.bat` in this folder, or the copy on the Desktop named `Start Portfolio.bat`. The window starts two processes: the Stage 3 live session (incremental catch-up, then the IEX stream) and the Streamlit dashboard. Closing that window stops both. It does not install a Windows service or a startup task, and it does not build an executable.
 
-The dashboard has three sections:
+The left sidebar keeps Portfolio, Stock, and Database at the top. Below them, **ML Methods** lists each model window. Random Forest is the only model there so far. A later model is added to that list and does not move the first three pages.
+
+The dashboard sections:
 
 - Portfolio: share count and purchase price for each monitored stock, saved in `portfolio_holdings`. Total value uses the latest stored close. Total invested, unrealized P/L, and allocation weights are shown there. Holdings stay separate from the watchlist.
 - Stock: latest stored price, daily percent change, volume, and a chart with candlesticks, volume, moving averages, RSI, MACD, Bollinger Bands, and VWAP. The left button shows daily candles. The right button shows the last year of minute candles. Drag or scroll to zoom either chart. Nights, weekends, and holidays are left off the axis, so sessions sit back to back. A missing minute stays a break. No price is invented for closed time. The chart reloads about once a minute while the page is open.

@@ -284,6 +284,19 @@ def test_stock_figure_uses_stored_candles() -> None:
     assert "bar" in kinds
 
 
+def test_sidebar_keeps_the_first_pages_above_ml_methods() -> None:
+    text = (ROOT / "app" / "dashboard.py").read_text(encoding="utf-8")
+    assert "MAIN_PAGES = (PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE)" in text
+    assert "ML_PAGES = (PAGE_FOREST,)" in text
+    assert 'st.sidebar.subheader("ML Methods")' in text
+    assert "[PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE, PAGE_FOREST]" not in text
+    sidebar = text.split("def _sidebar_page", 1)[1].split("def _nav_button", 1)[0]
+    main_at = sidebar.index("for name in MAIN_PAGES:")
+    heading_at = sidebar.index('st.sidebar.subheader("ML Methods")')
+    model_at = sidebar.index("for name in ML_PAGES:")
+    assert main_at < heading_at < model_at
+
+
 def test_stock_page_explains_each_chart_indicator() -> None:
     text = (ROOT / "app" / "dashboard.py").read_text(encoding="utf-8")
     assert "How to read this chart" in text
