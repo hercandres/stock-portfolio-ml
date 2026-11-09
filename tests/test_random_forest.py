@@ -300,7 +300,9 @@ def test_all_scores_pool_every_row_and_measure_stock_spread() -> None:
 
 def test_dashboard_explains_the_forest_and_does_not_rank_missing_models() -> None:
     text = (ROOT / "app" / "dashboard.py").read_text(encoding="utf-8")
-    assert 'st.button("RUN RANDOM FOREST")' in text
+    assert 'st.button("Run model")' in text
+    assert "_train_forest_once" in text
+    assert "UPDATE MARKET DATA" not in text
     assert "This is a model estimate, not a trade." in text
     assert '["All", *symbols]' in text
     assert 'st.subheader(f"This stock: {symbol}")' in text

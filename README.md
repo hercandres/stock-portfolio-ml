@@ -34,7 +34,7 @@ Minute requests use `timeframe=1Min`, `feed=iex`, and `adjustment=split`. Daily 
 
 `python -m data_collection.sync_history` is the full 365-day minute download. `python -m data_collection.sync_daily` downloads daily bars into `daily_prices` and does not change minute rows. `python -m data_collection.incremental` asks only for minutes after `sync_status.latest_success_timestamp`. If that cursor is empty but bars are already stored, the next request starts after the newest stored bar. A weekend, holiday, or closed market is success with nothing new. One ticker's failure does not stop the others.
 
-The live session uses `wss://stream.data.alpaca.markets/v2/iex` for the 25 symbols. It subscribes to completed minute bars and quotes. Only a completed bar is written. Quotes stay in memory. Trades are not subscribed and are not stored. A dropped socket reconnects, then the incremental sync fills minutes the stream missed. Authentication failure stops the session instead of retrying.
+The live session uses `wss://stream.data.alpaca.markets/v2/iex` for the 25 symbols. It subscribes to completed minute bars and quotes. Only a completed bar is written, and that write also drops the same ticker's minute from 365 days earlier. Quotes stay in memory. Trades are not subscribed and are not stored. At launch, and about every five minutes while the window is open, it fills missing minutes and any finished daily bar that is not stored yet. A dropped socket reconnects, then that catch-up runs again. Authentication failure stops the session instead of retrying. Closing the window stops the process. Nothing keeps running after that.
 
 Collection runs only inside the Start Portfolio window. There is no Windows service, startup task, or scheduler. `python -m data_collection.live_session` still blocks in the foreground if you start it by itself. The normal way to open the app is to double-click `Start Portfolio.bat`.
 
@@ -100,10 +100,10 @@ Double-click `Start Portfolio.bat` in this folder, or the copy on the Desktop na
 The dashboard has three sections:
 
 - Portfolio: share count and purchase price for each monitored stock, saved in `portfolio_holdings`. Total value uses the latest stored close. Total invested, unrealized P/L, and allocation weights are shown there. Holdings stay separate from the watchlist.
-- Stock: latest stored price, daily percent change, volume, and a chart with candlesticks, volume, moving averages, RSI, MACD, Bollinger Bands, and VWAP. The left button shows daily candles back to 2016. The right button shows the last year of minute candles. Drag or scroll to zoom either chart.
+- Stock: latest stored price, daily percent change, volume, and a chart with candlesticks, volume, moving averages, RSI, MACD, Bollinger Bands, and VWAP. The left button shows daily candles. The right button shows the last year of minute candles. Drag or scroll to zoom either chart. Nights, weekends, and holidays are left off the axis, so sessions sit back to back. A missing minute stays a break. No price is invented for closed time. The chart reloads about once a minute while the page is open.
 - Database: monitored count, row count, latest sync timestamp, collection status, file size, and use against the 5 GB cap. The feed is labeled IEX and about 15 minutes delayed on historical catch-up.
 
-UPDATE MARKET DATA runs only the incremental catch-up. It does not download the full year again. A closed market still shows the latest stored bars, including Friday's session.
+There is no Update market data button. While Start Portfolio is open, minute bars append themselves and a finished day is written to `daily_prices`. A closed market still shows the latest stored bars, including Friday's session.
 
 These commands were run on this PC with Python 3.14. They call the virtual environment's Python directly.
 
@@ -129,7 +129,7 @@ Pytest uses synthetic fixtures and mocked responses. Tickers in those fixtures l
 
 ## Random forest
 
-This is the only model. It does not run when the dashboard opens. On the Random Forest page, **RUN RANDOM FOREST** reads `daily_prices` with pandas, builds one row per stock per trading day back to 2016, then fits three scikit-learn forests for 1, 5, and 20 trading days. Minute bars are not the training rows.
+This is the only model. When the dashboard session starts, it reads `daily_prices` with pandas and fits three scikit-learn forests for 1, 5, and 20 trading days. **Run model** on the Random Forest page does that again. Minute bars are not the training rows.
 
 ```text
 python -m machine_learning.supervised.random_forest.features

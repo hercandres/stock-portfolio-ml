@@ -34,6 +34,7 @@ from .alpaca_bars import (
 )
 from .credentials import REQUIRED_ALPACA_KEYS, resolve_alpaca_keys
 from .incremental import run_incremental, stored_timestamp
+from .sync_daily import catch_up_daily
 from .sync_history import DEFAULT_ENV_PATH, record_sync_status
 from .universe import MONITORED_STOCKS
 
@@ -234,18 +235,27 @@ class MarketDataSession:
                     break
 
     def _catch_up(self, skip_when_closed: bool) -> None:
+        """Fill missing minutes, then any finished daily bar that is not stored yet."""
         try:
             if self._catch_up_override is not None:
                 self._catch_up_override(skip_when_closed)
             else:
                 pairs = tuple((symbol, symbol) for symbol in self.symbols)
+                use_pairs = self.symbols != tuple(symbol for symbol, _name in MONITORED_STOCKS)
                 run_incremental(
                     self.db_path,
                     self.env_path,
                     environ=self._environ,
                     now=self._clock(),
-                    symbols=pairs if self.symbols != tuple(s for s, _n in MONITORED_STOCKS) else None,
+                    symbols=pairs if use_pairs else None,
                     skip_when_closed=skip_when_closed,
+                )
+                catch_up_daily(
+                    self.db_path,
+                    self.env_path,
+                    environ=self._environ,
+                    now=self._clock(),
+                    symbols=pairs if use_pairs else None,
                 )
         except Exception:
             logger.warning("incremental sync failed; the session keeps running")

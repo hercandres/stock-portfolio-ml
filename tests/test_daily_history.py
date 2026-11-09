@@ -6,8 +6,9 @@ Every row here is synthetic. Nothing reads or writes database/stock_market.db.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -20,8 +21,9 @@ from data_collection.daily_bars import (
     parse_daily_bar,
     trading_date,
 )
+from data_collection.market_calendar import is_nyse_holiday, session_has_a_hole
 from data_collection.retention import apply_retention
-from data_collection.sync_daily import run_daily_sync
+from data_collection.sync_daily import catch_up_daily, run_daily_sync
 from database.connection import (
     get_connection,
     insert_completed_minute_bars,
@@ -30,6 +32,7 @@ from database.connection import (
 )
 from database.initialize import initialize_database
 
+NY = ZoneInfo("America/New_York")
 NOW = datetime(2026, 11, 9, 15, 0, tzinfo=timezone.utc)
 SECRET = "test-secret-value"
 KEYS = {"APCA_API_KEY_ID": "test-key-id", "APCA_API_SECRET_KEY": SECRET}
@@ -247,3 +250,82 @@ def test_duplicate_daily_date_refreshes_the_same_row(tmp_path: Path) -> None:
     assert (
         datetime(2026, 11, 9, 14, 31, tzinfo=timezone.utc) - timedelta(days=365)
     ).strftime("%Y-%m-%dT%H:%M:%SZ") == "2025-11-09T14:31:00Z"
+
+
+def test_holidays_are_closed_and_a_skipped_minute_is_a_hole() -> None:
+    assert is_nyse_holiday(date(2026, 1, 19))
+    assert is_nyse_holiday(date(2026, 4, 3))
+    assert is_nyse_holiday(date(2022, 6, 20))
+    assert not is_nyse_holiday(date(2021, 6, 18))
+    assert not is_nyse_holiday(date(2026, 11, 6))
+    friday = datetime(2026, 11, 6, 15, 59, tzinfo=NY)
+    monday = datetime(2026, 11, 9, 9, 30, tzinfo=NY)
+    assert session_has_a_hole(friday, monday, "1m") is False
+    before = datetime(2026, 11, 6, 10, 0, tzinfo=NY)
+    skipped = datetime(2026, 11, 6, 10, 2, tzinfo=NY)
+    assert session_has_a_hole(before, skipped, "1m") is True
+
+
+def test_daily_catch_up_fills_only_the_missing_day_and_keeps_minutes(tmp_path: Path) -> None:
+    db_path = tmp_path / "synthetic_gap.db"
+    _seed_stock(db_path, "TEST1")
+    with get_connection(db_path) as connection:
+        insert_daily_prices(connection, [("TEST1", "2026-11-06", 1, 1, 1, 1, 1)])
+        insert_historical_prices(
+            connection,
+            [("TEST1", "2026-11-06T15:00:00Z", 9, 9, 9, 9, 9, "1m")],
+        )
+    calls: list[datetime] = []
+
+    class Gap:
+        def daily_bars_from(self, symbol: str, start: datetime, now: datetime) -> DailyFetch:
+            calls.append(start)
+            bar = parse_daily_bar(symbol, _day(symbol, "2026-11-09T05:00:00Z", 4))
+            return DailyFetch(bars=(bar,), raw_bar_count=1)
+
+    # Monday 10:00 ET. Friday is still the latest finished session, so nothing is asked.
+    early = catch_up_daily(
+        db_path,
+        tmp_path / "missing.env",
+        environ=KEYS,
+        client=Gap(),
+        now=NOW,
+        symbols=(("TEST1", "Synthetic Fixture TEST1"),),
+    )
+    assert early.results[0].message == "Daily bars are already current."
+    assert calls == []
+    # After the close, only the missing day is requested. The minute row stays.
+    after_close = datetime(2026, 11, 9, 21, 30, tzinfo=timezone.utc)
+    outcome = catch_up_daily(
+        db_path,
+        tmp_path / "missing.env",
+        environ=KEYS,
+        client=Gap(),
+        now=after_close,
+        symbols=(("TEST1", "Synthetic Fixture TEST1"),),
+    )
+    assert outcome.results[0].status == "success"
+    assert calls[0].date() == date(2026, 11, 7)
+    with get_connection(db_path) as connection:
+        days = [row["date"] for row in connection.execute("SELECT date FROM daily_prices ORDER BY date")]
+        minute = connection.execute("SELECT close FROM historical_prices").fetchone()["close"]
+    assert days == ["2026-11-06", "2026-11-09"]
+    assert minute == 9
+
+
+def test_live_catch_up_asks_for_minutes_and_then_daily(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from data_collection import live_session
+
+    calls: list[str] = []
+    monkeypatch.setattr(live_session, "run_incremental", lambda *_args, **_kwargs: calls.append("minute"))
+    monkeypatch.setattr(live_session, "catch_up_daily", lambda *_args, **_kwargs: calls.append("daily"))
+    session = live_session.MarketDataSession(
+        tmp_path / "unused.db",
+        tmp_path / "missing.env",
+        symbols=("TEST1",),
+        clock=lambda: NOW,
+        api_key_id="test-key-id",
+        api_secret_key=SECRET,
+    )
+    session._catch_up(False)
+    assert calls == ["minute", "daily"]

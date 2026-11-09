@@ -148,10 +148,21 @@ class AlpacaDailyClient:
 
     def historical_daily_bars(self, symbol: str, now: datetime) -> DailyFetch:
         """Bars from 2016-01-01, or the first day Alpaca has, through the last session."""
-        if now.tzinfo is None:
-            raise ValueError("now must be timezone-aware")
         start = datetime(DAILY_START.year, DAILY_START.month, DAILY_START.day, tzinfo=timezone.utc)
+        return self.daily_bars_from(symbol, start, now)
+
+    def daily_bars_from(self, symbol: str, start: datetime, now: datetime) -> DailyFetch:
+        """Bars from ``start`` through the latest finished session.
+
+        Used to fill only the days that are not stored yet. A start after the
+        latest session calls nothing.
+        """
+        if start.tzinfo is None or now.tzinfo is None:
+            raise ValueError("start and now must be timezone-aware")
         end = now.astimezone(timezone.utc).replace(microsecond=0)
+        start = start.astimezone(timezone.utc).replace(microsecond=0)
+        if start > end:
+            return DailyFetch(bars=(), raw_bar_count=0)
         page_token: str | None = None
         stored: list[DailyBar] = []
         raw_bar_count = 0
