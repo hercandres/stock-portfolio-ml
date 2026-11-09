@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
-from database.connection import get_connection, insert_historical_prices_ignoring_duplicates
+from database.connection import get_connection, insert_completed_minute_bars
 from database.initialize import DEFAULT_DB_PATH
 
 from .alpaca_bars import (
@@ -342,7 +342,8 @@ class MarketDataSession:
             return
         try:
             with get_connection(self.db_path) as connection:
-                insert_historical_prices_ignoring_duplicates(connection, [bar.as_row()])
+                # A new minute also drops this ticker's minute from one year ago.
+                insert_completed_minute_bars(connection, [bar.as_row()])
         except Exception:
             logger.warning("could not store a completed bar for %s at %s", symbol, bar.timestamp)
             return

@@ -81,6 +81,7 @@ class StockSnapshot:
 class DatabaseOverview:
     monitored: int
     price_rows: int
+    daily_rows: int
     latest_sync: str | None
     last_attempt: str | None
     success_count: int
@@ -337,6 +338,36 @@ def load_chart_bars(db_path: str | Path, symbol: str, range_key: str) -> list[Pr
     return load_bars(db_path, symbol, start=fetch_start(latest, range_key))
 
 
+def load_daily_chart_bars(db_path: str | Path, symbol: str) -> list[PriceBar]:
+    """Daily candles for one symbol, oldest first. Reads ``daily_prices`` only."""
+    with get_connection(db_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT date, open, high, low, close, volume
+            FROM daily_prices
+            WHERE ticker = ?
+            ORDER BY date
+            """,
+            (symbol,),
+        ).fetchall()
+    bars: list[PriceBar] = []
+    for row in rows:
+        year, month, day = (int(part) for part in str(row["date"]).split("-"))
+        # 09:30 New York keeps the candle on the stored session date.
+        started = datetime(year, month, day, 9, 30, tzinfo=NEW_YORK).astimezone(timezone.utc)
+        bars.append(
+            PriceBar(
+                started_at=started,
+                open=row["open"],
+                high=row["high"],
+                low=row["low"],
+                close=row["close"],
+                volume=row["volume"],
+            )
+        )
+    return bars
+
+
 def load_snapshot_bars(db_path: str | Path, symbol: str) -> list[PriceBar]:
     """Recent sessions, enough to compare the last two stored trading days."""
     with get_connection(db_path) as connection:
@@ -374,6 +405,9 @@ def database_overview(db_path: str | Path, now: datetime) -> DatabaseOverview:
         price_rows = connection.execute(
             "SELECT COUNT(*) AS n FROM historical_prices"
         ).fetchone()["n"]
+        daily_rows = connection.execute(
+            "SELECT COUNT(*) AS n FROM daily_prices"
+        ).fetchone()["n"]
         sync = connection.execute(
             """
             SELECT
@@ -390,6 +424,7 @@ def database_overview(db_path: str | Path, now: datetime) -> DatabaseOverview:
     return DatabaseOverview(
         monitored=int(monitored),
         price_rows=int(price_rows),
+        daily_rows=int(daily_rows),
         latest_sync=None if sync is None else sync["latest_sync"],
         last_attempt=None if sync is None else sync["last_attempt"],
         success_count=success_count,

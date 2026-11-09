@@ -241,6 +241,12 @@ def test_stock_figure_uses_stored_candles() -> None:
 def test_stock_page_explains_each_chart_indicator() -> None:
     text = (ROOT / "app" / "dashboard.py").read_text(encoding="utf-8")
     assert "How to read this chart" in text
+    assert "Daily since 2016" in text
+    assert "Minutes, last year" in text
+    assert "load_daily_chart_bars" in text
+    assert "load_chart_bars" in text
+    assert "daily_prices" in text
+    assert "historical_prices" in text
     for name in (
         "Price",
         "Volume",

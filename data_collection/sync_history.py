@@ -18,7 +18,7 @@ from database.connection import (
     UTC_TIMESTAMP_FORMAT,
     ensure_utc_timestamp,
     get_connection,
-    insert_historical_prices_ignoring_duplicates,
+    insert_completed_minute_bars,
     transaction,
 )
 from database.initialize import DEFAULT_DB_PATH, initialize_database
@@ -120,7 +120,7 @@ def _sync_one(
         return SymbolSync(symbol, "empty", 0, None, message)
     try:
         with get_connection(db_path) as connection:
-            inserted = insert_historical_prices_ignoring_duplicates(
+            inserted = insert_completed_minute_bars(
                 connection,
                 [bar.as_row() for bar in fetched.bars],
             )

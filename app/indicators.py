@@ -247,7 +247,7 @@ def fetch_start(latest: datetime, range_key: str) -> datetime:
 
 
 def prepare_chart(bars: list[PriceBar], range_key: str) -> list[ChartPoint]:
-    """Aggregate stored bars and attach indicators for the visible window."""
+    """Aggregate stored minute bars and attach indicators for the visible window."""
     if range_key not in AGGREGATION:
         raise ValueError(f"unknown range {range_key}")
     ordered = sorted(bars, key=lambda bar: bar.started_at)
@@ -255,17 +255,40 @@ def prepare_chart(bars: list[PriceBar], range_key: str) -> list[ChartPoint]:
         return []
     rule = AGGREGATION[range_key]
     candles = aggregate_bars(ordered, rule)
+    visible_from = display_start(ordered[-1].started_at, range_key)
+    return _points(candles, reset_each_session=rule != "1d", visible_from=visible_from)
+
+
+def prepare_daily_chart(bars: list[PriceBar]) -> list[ChartPoint]:
+    """Indicators for every daily candle.
+
+    The first stored day stays on the chart (2016, or later when the stock
+    is newer). Dragging and scrolling zoom it the same way the minute chart
+    zooms. Nothing here is cut down to the last year.
+    """
+    ordered = sorted(bars, key=lambda bar: bar.started_at)
+    return _points(ordered, reset_each_session=False, visible_from=None)
+
+
+def _points(
+    candles: list[PriceBar],
+    *,
+    reset_each_session: bool,
+    visible_from: datetime | None,
+) -> list[ChartPoint]:
+    """Attach the same indicators the stock chart already draws."""
+    if not candles:
+        return []
     closes = [bar.close for bar in candles]
     fast = sma(closes, 20)
     slow = sma(closes, 50)
     middle, upper, lower = bollinger(closes)
-    vwap = vwap_series(candles, reset_each_session=rule != "1d")
+    vwap = vwap_series(candles, reset_each_session=reset_each_session)
     momentum = rsi(closes)
     macd_line, signal_line, histogram = macd(closes)
-    visible_from = display_start(ordered[-1].started_at, range_key)
     points: list[ChartPoint] = []
     for index, bar in enumerate(candles):
-        if bar.started_at < visible_from:
+        if visible_from is not None and bar.started_at < visible_from:
             continue
         points.append(
             ChartPoint(

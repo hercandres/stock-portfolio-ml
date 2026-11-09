@@ -25,6 +25,7 @@ CREATED_AT = "2026-01-01T00:00:00Z"
 EXPECTED_TABLES = {
     "stocks",
     "historical_prices",
+    "daily_prices",
     "portfolio_holdings",
     "sync_status",
     "model_runs",
@@ -52,6 +53,16 @@ EXPECTED_COLUMNS = {
         "close",
         "volume",
         "interval",
+    },
+    "daily_prices": {
+        "id",
+        "ticker",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
     },
     "portfolio_holdings": {
         "id",
@@ -137,6 +148,7 @@ def test_schema_creates_required_tables(db_path: Path) -> None:
         indexes = {row["name"] for row in index_rows}
         assert "idx_historical_prices_ticker_timestamp" in indexes
         assert "idx_historical_prices_interval" in indexes
+        assert "idx_daily_prices_ticker_date" in indexes
         foreign_keys = connection.execute("PRAGMA foreign_keys").fetchone()[0]
         assert foreign_keys == 1
 

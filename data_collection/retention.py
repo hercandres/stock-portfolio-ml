@@ -1,8 +1,9 @@
-"""Delete price rows older than 365 days while this process is running.
+"""Delete minute rows older than 365 days while this process is running.
 
-Nothing here registers a Windows service, a startup task, or a scheduler.
-The incremental sync and the live session call this before they return or
-while their process is still alive.
+``historical_prices`` is the rolling year of 1-minute bars. ``daily_prices``
+is a separate table and is kept. Nothing here registers a Windows service,
+a startup task, or a scheduler. The incremental sync and the live session
+call this before they return or while their process is still alive.
 """
 
 from __future__ import annotations
@@ -34,12 +35,12 @@ class RetentionResult:
 
 
 def apply_retention(db_path: str | Path, now: datetime) -> RetentionResult:
-    """Delete ``historical_prices`` strictly older than 365 calendar days.
+    """Delete 1-minute bars strictly older than 365 calendar days.
 
-    A row at the cutoff stays. Newer rows stay. The main database file size
-    is logged. A file larger than 4 GB is a warning. The storage cap target
-    is 5 GB; this function does not delete rows inside the 365-day window
-    to chase that number.
+    A minute at the cutoff stays. Newer minutes stay. Daily bars are not
+    deleted. The main database file size is logged. A file larger than 4 GB
+    is a warning. The storage cap target is 5 GB; this function does not
+    delete rows inside the 365-day window to chase that number.
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")

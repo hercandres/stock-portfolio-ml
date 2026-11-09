@@ -24,7 +24,7 @@ from data_collection.sync_history import DEFAULT_ENV_PATH
 from database.initialize import DEFAULT_DB_PATH
 
 from app.charts import build_allocation_figure, build_stock_figure
-from app.indicators import RANGE_KEYS, prepare_chart
+from app.indicators import RANGE_KEYS, prepare_chart, prepare_daily_chart
 from app.portfolio import (
     database_overview,
     describe_catch_up,
@@ -35,6 +35,7 @@ from app.portfolio import (
     latest_stored_timestamp,
     list_positions,
     load_chart_bars,
+    load_daily_chart_bars,
     load_snapshot_bars,
     market_banner,
     portfolio_totals,
@@ -76,7 +77,9 @@ def render(db_path: Path) -> None:
         [PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE, PAGE_FOREST],
     )
     st.sidebar.caption(
-        "IEX free tier. Historical catch-up skips about the latest 15 minutes. "
+        "The chart can show the last year of minute bars or daily bars back to 2016. "
+        "The random forest trains on the daily bars. "
+        "IEX free tier. Historical minute catch-up skips about the latest 15 minutes. "
         "Trades and quotes are not stored."
     )
     _catch_up_button(db_path)
@@ -240,16 +243,36 @@ _CHART_NOTES: tuple[tuple[str, str], ...] = (
 )
 
 
+def _chart_notes(mode: str) -> tuple[tuple[str, str], ...]:
+    """The shared notes, with the first one saying which prices are on screen."""
+    notes = list(_CHART_NOTES)
+    title, body = notes[0]
+    if mode == "daily":
+        showing = (
+            "This chart is daily candles from daily_prices, from 2016 or this stock's first stored day, through the latest session. "
+            "Each candle is one trading day. Drag or scroll to zoom, the same way as the minute chart. "
+            "The button on the right switches to the last year of 1-minute candles. "
+        )
+    else:
+        showing = (
+            "This chart is the last year of 1-minute candles from historical_prices. "
+            "The button on the left switches to daily candles back to 2016. "
+            "Models train on those daily bars, not on these minutes. "
+        )
+    notes[0] = (title, showing + body)
+    return tuple(notes)
+
+
 def _stock_page(db_path: Path) -> None:
     st.header("Stock")
     positions = list_positions(db_path)
     if not positions:
         st.warning("No monitored stocks are in the database yet.")
         return
+    if "price_chart" not in st.session_state:
+        st.session_state["price_chart"] = "minutes"
     labels = [f"{position.symbol} — {position.company_name}" for position in positions]
-    columns = st.columns([2, 1])
-    choice = columns[0].selectbox("Stock", labels)
-    range_key = columns[1].selectbox("Range", RANGE_KEYS, index=0)
+    choice = st.selectbox("Stock", labels)
     symbol = positions[labels.index(choice)].symbol
     snapshot = stock_snapshot(symbol, load_snapshot_bars(db_path, symbol))
     price_column, change_column, volume_column, session_column = st.columns(4)
@@ -270,15 +293,40 @@ def _stock_page(db_path: Path) -> None:
         f"{snapshot.session_volume:,}" if snapshot.session_volume is not None else "—",
     )
     if snapshot.latest_timestamp:
-        st.caption(f"Latest stored bar {format_et(snapshot.latest_timestamp)}.")
-    points = prepare_chart(load_chart_bars(db_path, symbol, range_key), range_key)
+        st.caption(f"Latest stored minute bar {format_et(snapshot.latest_timestamp)}.")
+    mode = st.session_state["price_chart"]
+    left, right = st.columns(2)
+    if left.button(
+        "Daily since 2016",
+        type="primary" if mode == "daily" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state["price_chart"] = "daily"
+        st.rerun()
+    if right.button(
+        "Minutes, last year",
+        type="primary" if mode == "minutes" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state["price_chart"] = "minutes"
+        st.rerun()
+    if mode == "daily":
+        points = prepare_daily_chart(load_daily_chart_bars(db_path, symbol))
+        st.caption(
+            "Showing daily candles from daily_prices. "
+            "Drag or scroll to zoom, the same way as the minute chart."
+        )
+    else:
+        range_key = st.selectbox("Range", RANGE_KEYS, index=0)
+        points = prepare_chart(load_chart_bars(db_path, symbol, range_key), range_key)
+        st.caption(
+            "Showing the last year of minute candles from historical_prices. "
+            "SMA 20, SMA 50, Bollinger Bands, and VWAP are on the price panel. "
+            "RSI and MACD use the same candles. Daily ranges use one candle per session."
+        )
     st.plotly_chart(build_stock_figure(symbol, points), use_container_width=True)
-    st.caption(
-        "SMA 20, SMA 50, Bollinger Bands, and VWAP are on the price panel. "
-        "RSI and MACD use the same candles. Daily ranges use one candle per session."
-    )
     st.subheader("How to read this chart")
-    for title, body in _CHART_NOTES:
+    for title, body in _chart_notes(mode):
         st.markdown(f"**{title}.** {body}")
 
 
@@ -286,9 +334,10 @@ def _database_page(db_path: Path, now: datetime) -> None:
     st.header("Database")
     overview = database_overview(db_path, now)
     used = overview.database_bytes / overview.cap_bytes if overview.cap_bytes else 0
-    monitored_column, rows_column, size_column, use_column = st.columns(4)
+    monitored_column, minute_column, daily_column, size_column, use_column = st.columns(5)
     monitored_column.metric("Stocks monitored", str(overview.monitored))
-    rows_column.metric("Price rows", f"{overview.price_rows:,}")
+    minute_column.metric("Minute rows", f"{overview.price_rows:,}")
+    daily_column.metric("Daily rows", f"{overview.daily_rows:,}")
     size_column.metric("Database size", f"{overview.database_bytes:,} bytes")
     use_column.metric("Storage use", f"{used:.1%} of 5 GB")
     if overview.database_bytes > overview.warning_bytes:
@@ -309,6 +358,11 @@ def _database_page(db_path: Path, now: datetime) -> None:
     market_text = "open" if overview.market == "open" else "closed"
     st.write(f"**Regular US session:** {market_text}.")
     st.write("**Feed:** IEX, the free Alpaca tier. It is not the consolidated SIP feed.")
+    st.write(
+        "Minute bars in historical_prices are the last year. The chart's right button and the live session use them. "
+        "Daily bars in daily_prices go back to 2016, or the first day a stock has, and the random forest trains on them. "
+        "The 365-day delete does not remove daily bars."
+    )
     st.write(
         "Historical catch-up is delayed by about 15 minutes. "
         "Completed 1-minute bars update only while the Start Portfolio window is open. "
@@ -335,7 +389,7 @@ def _forest_symbols(db_path: Path) -> list[str]:
 
 def _run_random_forest(db_path: Path) -> None:
     """Build daily rows, then fit the three forests. Not called on page load."""
-    with st.spinner("Building daily rows and training the three forests..."):
+    with st.spinner("Reading daily_prices and training the three forests..."):
         from machine_learning.supervised.random_forest.features import build_and_save
         from machine_learning.supervised.random_forest.train import train_and_save
 
@@ -351,9 +405,11 @@ def _run_random_forest(db_path: Path) -> None:
 def _forest_explanation() -> None:
     st.subheader("How the rows are built")
     st.markdown(
-        "The database stores a price every minute. This model does not use those "
-        "minutes one by one. It keeps **one row per stock per trading day**: the "
-        "first price, the high, the low, the last price, and the day's volume."
+        "The model reads **daily_prices**: one row per stock per trading day, "
+        "from 2016 or that stock's first day, through the latest session. "
+        "The open, high, low, close, and volume on that row are the day's prices. "
+        "Charts can show those daily candles or the last year of minute bars in "
+        "**historical_prices**. Training uses the daily rows, not the minutes."
     )
     st.markdown(
         "Each number describes a day that has already finished. "

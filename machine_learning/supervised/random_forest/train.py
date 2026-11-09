@@ -338,9 +338,14 @@ def train_and_save(
     feature_path: str | Path | None = None,
     output_dir: str | Path | None = None,
 ) -> list[dict]:
-    """Read the feature CSV, fit three forests, and save scores plus predictions."""
+    """Read the feature CSV, fit three forests, and save scores plus predictions.
+
+    The CSV is built from ``daily_prices``. pandas reads those rows.
+    ``RandomForestRegressor`` is the scikit-learn model that learns them.
+    """
     features = Path(feature_path) if feature_path is not None else DEFAULT_EXPORT
     folder = Path(output_dir) if output_dir is not None else DEFAULT_OUTPUT
+    # One row per stock per day, already engineered from daily_prices.
     frame = pd.read_csv(features)
     started_at = utc_now_iso()
     results = fit_horizons(frame)
