@@ -1,9 +1,10 @@
 """Streamlit portfolio dashboard.
 
 Run with ``python -m streamlit run app/dashboard.py``. The Start Portfolio
-window owns the live IEX session. This process reads SQLite and, when asked,
-runs the incremental catch-up. The random forest runs only when the Random
-Forest page button is pressed.
+window owns the live IEX session. While that window is open, minute bars
+append about once a minute and a finished day is written to daily prices.
+This process only reads SQLite. The random forest trains once when the
+dashboard session starts, and again only from Run model.
 """
 
 from __future__ import annotations
@@ -19,15 +20,12 @@ if str(ROOT) not in sys.path:
 
 import streamlit as st
 
-from data_collection.incremental import run_incremental
-from data_collection.sync_history import DEFAULT_ENV_PATH
 from database.initialize import DEFAULT_DB_PATH
 
 from app.charts import build_allocation_figure, build_stock_figure
-from app.indicators import RANGE_KEYS, prepare_chart
+from app.indicators import AGGREGATION, RANGE_KEYS, prepare_chart, prepare_daily_chart
 from app.portfolio import (
     database_overview,
-    describe_catch_up,
     format_et,
     format_money,
     format_percent,
@@ -35,6 +33,7 @@ from app.portfolio import (
     latest_stored_timestamp,
     list_positions,
     load_chart_bars,
+    load_daily_chart_bars,
     load_snapshot_bars,
     market_banner,
     portfolio_totals,
@@ -76,12 +75,13 @@ def render(db_path: Path) -> None:
         [PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE, PAGE_FOREST],
     )
     st.sidebar.caption(
-        "IEX free tier. Historical catch-up skips about the latest 15 minutes. "
-        "Trades and quotes are not stored."
+        "While this window is open, minute bars append about once a minute "
+        "and a finished day is saved with the daily bars. "
+        "The left chart button is daily prices. The right button is the last year of minutes. "
+        "Closed nights, weekends, and holidays are left off both charts. "
+        "The random forest trains on the daily bars."
     )
-    _catch_up_button(db_path)
-    if "catch_up_result" in st.session_state:
-        st.info(st.session_state["catch_up_result"])
+    _train_forest_once(db_path)
     if page == PAGE_PORTFOLIO:
         _portfolio_page(db_path)
     elif page == PAGE_STOCK:
@@ -92,31 +92,7 @@ def render(db_path: Path) -> None:
         _database_page(db_path, now)
 
 
-def _catch_up_button(db_path: Path) -> None:
-    st.sidebar.markdown("**Market data**")
-    if st.sidebar.button("UPDATE MARKET DATA", type="primary"):
-        with st.spinner("Requesting missing IEX minutes..."):
-            try:
-                outcome = run_incremental(db_path, DEFAULT_ENV_PATH)
-            except Exception:
-                st.session_state["catch_up_result"] = (
-                    "Catch-up failed before it could finish. No secret was printed."
-                )
-            else:
-                errors = [
-                    (item.symbol, item.message)
-                    for item in outcome.results
-                    if item.status == "error"
-                ]
-                st.session_state["catch_up_result"] = describe_catch_up(
-                    inserted=outcome.inserted,
-                    missing_keys=outcome.missing_keys,
-                    errors=errors,
-                    database_bytes=outcome.database_bytes,
-                )
-        st.rerun()
-
-
+@st.fragment(run_every=60)
 def _portfolio_page(db_path: Path) -> None:
     st.header("Portfolio")
     st.caption("Holdings are saved in portfolio_holdings. The watchlist is unchanged.")
@@ -240,16 +216,40 @@ _CHART_NOTES: tuple[tuple[str, str], ...] = (
 )
 
 
+def _chart_notes(mode: str) -> tuple[tuple[str, str], ...]:
+    """The shared notes, with the first one saying which prices are on screen."""
+    notes = list(_CHART_NOTES)
+    title, body = notes[0]
+    if mode == "daily":
+        showing = (
+            "This chart is daily candles from daily_prices, from 2016 or this stock's first stored day, through the latest session. "
+            "Each candle is one trading day. Nights, weekends, and holidays are skipped, so sessions sit back to back. "
+            "No price is invented for those closed times. Drag or scroll to zoom, the same way as the minute chart. "
+            "The button on the right switches to the last year of 1-minute candles. "
+        )
+    else:
+        showing = (
+            "This chart is the last year of 1-minute candles from historical_prices. "
+            "Nights, weekends, and holidays are skipped, so one session continues into the next. "
+            "A break is left only when a minute is missing from the data. Missing minutes are not filled with zero. "
+            "The button on the left switches to daily candles. "
+            "Models train on those daily bars, not on these minutes. "
+        )
+    notes[0] = (title, showing + body)
+    return tuple(notes)
+
+
+@st.fragment(run_every=60)
 def _stock_page(db_path: Path) -> None:
     st.header("Stock")
     positions = list_positions(db_path)
     if not positions:
         st.warning("No monitored stocks are in the database yet.")
         return
+    if "price_chart" not in st.session_state:
+        st.session_state["price_chart"] = "minutes"
     labels = [f"{position.symbol} — {position.company_name}" for position in positions]
-    columns = st.columns([2, 1])
-    choice = columns[0].selectbox("Stock", labels)
-    range_key = columns[1].selectbox("Range", RANGE_KEYS, index=0)
+    choice = st.selectbox("Stock", labels)
     symbol = positions[labels.index(choice)].symbol
     snapshot = stock_snapshot(symbol, load_snapshot_bars(db_path, symbol))
     price_column, change_column, volume_column, session_column = st.columns(4)
@@ -270,15 +270,43 @@ def _stock_page(db_path: Path) -> None:
         f"{snapshot.session_volume:,}" if snapshot.session_volume is not None else "—",
     )
     if snapshot.latest_timestamp:
-        st.caption(f"Latest stored bar {format_et(snapshot.latest_timestamp)}.")
-    points = prepare_chart(load_chart_bars(db_path, symbol, range_key), range_key)
-    st.plotly_chart(build_stock_figure(symbol, points), use_container_width=True)
-    st.caption(
-        "SMA 20, SMA 50, Bollinger Bands, and VWAP are on the price panel. "
-        "RSI and MACD use the same candles. Daily ranges use one candle per session."
-    )
+        st.caption(f"Latest stored minute bar {format_et(snapshot.latest_timestamp)}.")
+    mode = st.session_state["price_chart"]
+    left, right = st.columns(2)
+    if left.button(
+        "Daily since 2016",
+        type="primary" if mode == "daily" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state["price_chart"] = "daily"
+        st.rerun()
+    if right.button(
+        "Minutes, last year",
+        type="primary" if mode == "minutes" else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state["price_chart"] = "minutes"
+        st.rerun()
+    if mode == "daily":
+        points = prepare_daily_chart(load_daily_chart_bars(db_path, symbol))
+        step = "1d"
+        st.caption(
+            "Showing daily candles from daily_prices. "
+            "Closed days are skipped. Drag or scroll to zoom, the same way as the minute chart."
+        )
+    else:
+        range_key = st.selectbox("Range", RANGE_KEYS, index=0)
+        points = prepare_chart(load_chart_bars(db_path, symbol, range_key), range_key)
+        step = AGGREGATION[range_key]
+        st.caption(
+            "Showing the last year of minute candles from historical_prices. "
+            "Closed hours are skipped. A missing minute stays a break and is not filled with zero. "
+            "SMA 20, SMA 50, Bollinger Bands, and VWAP are on the price panel. "
+            "RSI and MACD use the same candles."
+        )
+    st.plotly_chart(build_stock_figure(symbol, points, step=step), use_container_width=True)
     st.subheader("How to read this chart")
-    for title, body in _CHART_NOTES:
+    for title, body in _chart_notes(mode):
         st.markdown(f"**{title}.** {body}")
 
 
@@ -286,9 +314,10 @@ def _database_page(db_path: Path, now: datetime) -> None:
     st.header("Database")
     overview = database_overview(db_path, now)
     used = overview.database_bytes / overview.cap_bytes if overview.cap_bytes else 0
-    monitored_column, rows_column, size_column, use_column = st.columns(4)
+    monitored_column, minute_column, daily_column, size_column, use_column = st.columns(5)
     monitored_column.metric("Stocks monitored", str(overview.monitored))
-    rows_column.metric("Price rows", f"{overview.price_rows:,}")
+    minute_column.metric("Minute rows", f"{overview.price_rows:,}")
+    daily_column.metric("Daily rows", f"{overview.daily_rows:,}")
     size_column.metric("Database size", f"{overview.database_bytes:,} bytes")
     use_column.metric("Storage use", f"{used:.1%} of 5 GB")
     if overview.database_bytes > overview.warning_bytes:
@@ -310,8 +339,14 @@ def _database_page(db_path: Path, now: datetime) -> None:
     st.write(f"**Regular US session:** {market_text}.")
     st.write("**Feed:** IEX, the free Alpaca tier. It is not the consolidated SIP feed.")
     st.write(
+        "Minute bars in historical_prices are the last year. The chart's right button and the live session use them. "
+        "Daily bars in daily_prices go back to 2016, or the first day a stock has, and the random forest trains on them. "
+        "The 365-day delete does not remove daily bars."
+    )
+    st.write(
         "Historical catch-up is delayed by about 15 minutes. "
-        "Completed 1-minute bars update only while the Start Portfolio window is open. "
+        "New minute bars append about once a minute while the Start Portfolio window is open. "
+        "A finished day is added to daily prices then too. "
         "Trades and quotes are not written to the database."
     )
 
@@ -333,9 +368,17 @@ def _forest_symbols(db_path: Path) -> list[str]:
     return [position.symbol for position in list_positions(db_path)]
 
 
-def _run_random_forest(db_path: Path) -> None:
-    """Build daily rows, then fit the three forests. Not called on page load."""
-    with st.spinner("Building daily rows and training the three forests..."):
+def _train_forest_once(db_path: Path) -> None:
+    """Train on daily prices the first time this dashboard session starts."""
+    if st.session_state.get("forest_ran"):
+        return
+    st.session_state["forest_ran"] = True
+    _train_forest(db_path)
+
+
+def _train_forest(db_path: Path) -> None:
+    """Read daily_prices with pandas, then fit the three scikit-learn forests."""
+    with st.spinner("Reading daily_prices and training the three forests..."):
         from machine_learning.supervised.random_forest.features import build_and_save
         from machine_learning.supervised.random_forest.train import train_and_save
 
@@ -344,16 +387,16 @@ def _run_random_forest(db_path: Path) -> None:
             train_and_save(db_path)
         except Exception:
             st.error("Random forest did not finish. No secret was printed.")
-            return
-    st.rerun()
 
 
 def _forest_explanation() -> None:
     st.subheader("How the rows are built")
     st.markdown(
-        "The database stores a price every minute. This model does not use those "
-        "minutes one by one. It keeps **one row per stock per trading day**: the "
-        "first price, the high, the low, the last price, and the day's volume."
+        "The model reads **daily_prices**: one row per stock per trading day, "
+        "from 2016 or that stock's first day, through the latest session. "
+        "The open, high, low, close, and volume on that row are the day's prices. "
+        "Charts can show those daily candles or the last year of minute bars in "
+        "**historical_prices**. Training uses the daily rows, not the minutes."
     )
     st.markdown(
         "Each number describes a day that has already finished. "
@@ -420,7 +463,7 @@ def _forest_chart(symbol: str, horizon: str) -> None:
 
     rows = _held_out_rows(symbol, horizon)
     if rows is None:
-        st.info("Press RUN RANDOM FOREST to score the held-out days.")
+        st.info("The model has not scored the held-out days yet.")
         return
     if rows.empty:
         st.info("This stock has no held-out days for that horizon.")
@@ -641,7 +684,7 @@ def _forest_comparison_table() -> None:
 
 def _random_forest_page(db_path: Path) -> None:
     st.header("Random Forest")
-    st.caption("Opening this page does not train. The button is the only way it runs.")
+    st.caption("Daily prices are read with pandas. The forest is scikit-learn. It already ran when the app opened.")
     symbols = _forest_symbols(db_path)
     symbol = st.selectbox("Stock", ["All", *symbols])
     st.caption("All uses every stock. A ticker uses only that stock.")
@@ -650,8 +693,9 @@ def _random_forest_page(db_path: Path) -> None:
         ["1", "5", "20"],
         format_func=lambda value: f"{value} trading days",
     )
-    if st.button("RUN RANDOM FOREST"):
-        _run_random_forest(db_path)
+    if st.button("Run model"):
+        _train_forest(db_path)
+        st.rerun()
     _forest_explanation()
     if symbol == "All":
         _forest_all_metrics(horizon)

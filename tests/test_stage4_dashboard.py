@@ -15,9 +15,11 @@ from zoneinfo import ZoneInfo
 from app.charts import build_stock_figure
 from app.indicators import (
     PriceBar,
+    _points,
     aggregate_bars,
     bollinger,
     prepare_chart,
+    prepare_daily_chart,
     rsi,
     sma,
     vwap_series,
@@ -227,6 +229,50 @@ def test_catch_up_text_does_not_request_a_full_year() -> None:
     assert "No request was sent." in missing
 
 
+def test_closed_time_is_skipped_and_a_missing_minute_stays_a_break() -> None:
+    friday_close = _at(2026, 11, 6, 15, 59, 10)
+    monday_open = _at(2026, 11, 9, 9, 30, 11)
+    across_the_close = _points(
+        [friday_close, monday_open],
+        reset_each_session=True,
+        visible_from=None,
+    )
+    minute_figure = build_stock_figure("TEST1", across_the_close, step="1m")
+    minute_closes = list(minute_figure.data[0].close)
+    assert minute_closes == [10, 11]
+    assert 0 not in minute_closes
+    breaks = list(minute_figure.layout.xaxis.rangebreaks)
+    bounds = [list(item["bounds"]) for item in breaks if item["bounds"] is not None]
+    assert ["sat", "mon"] in bounds
+    assert [16, 9.5] in bounds
+    holiday_values = next(item["values"] for item in breaks if item["values"] is not None)
+    assert "2026-01-19" in holiday_values
+
+    holiday_friday = _at(2026, 1, 16, 9, 30, 5)
+    after_mlk = _at(2026, 1, 20, 9, 30, 6)
+    daily_figure = build_stock_figure(
+        "TEST1",
+        prepare_daily_chart([holiday_friday, after_mlk]),
+        step="1d",
+    )
+    assert list(daily_figure.data[0].close) == [5, 6]
+    daily_breaks = list(daily_figure.layout.xaxis.rangebreaks)
+    daily_bounds = [list(item["bounds"]) for item in daily_breaks if item["bounds"] is not None]
+    assert [16, 9.5] not in daily_bounds
+    assert ["sat", "mon"] in daily_bounds
+
+    gapped = prepare_chart(
+        [_at(2026, 11, 6, 10, 0, 10), _at(2026, 11, 6, 10, 2, 12)],
+        "1D",
+    )
+    gap_figure = build_stock_figure("TEST1", gapped, step="1m")
+    gap_closes = list(gap_figure.data[0].close)
+    assert gap_closes[0] == 10
+    assert gap_closes[-1] == 12
+    assert None in gap_closes
+    assert 0 not in gap_closes
+
+
 def test_stock_figure_uses_stored_candles() -> None:
     points = prepare_chart(
         [_at(2026, 11, 6, 9, 30, 10, volume=2), _at(2026, 11, 6, 9, 31, 11, volume=3)],
@@ -241,6 +287,12 @@ def test_stock_figure_uses_stored_candles() -> None:
 def test_stock_page_explains_each_chart_indicator() -> None:
     text = (ROOT / "app" / "dashboard.py").read_text(encoding="utf-8")
     assert "How to read this chart" in text
+    assert "Daily since 2016" in text
+    assert "Minutes, last year" in text
+    assert "load_daily_chart_bars" in text
+    assert "load_chart_bars" in text
+    assert "daily_prices" in text
+    assert "historical_prices" in text
     for name in (
         "Price",
         "Volume",

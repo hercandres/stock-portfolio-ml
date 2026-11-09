@@ -1,7 +1,9 @@
 """One row per stock per trading day for the random forest.
 
-Minute bars are the raw history. This file rolls them up to a day because
-the question we ask is a daily percent change, not a one-minute tick.
+The rows come from ``daily_prices``. pandas reads that table and builds
+the features. scikit-learn trains on the CSV this file writes. Minute bars
+in ``historical_prices`` are for the chart, not for this model.
+
 The future targets are written beside the features so training can find
 them. They are not inputs.
 """
@@ -39,29 +41,6 @@ FEATURE_COLUMNS = [
 TARGET_COLUMNS = ["target_1d", "target_5d", "target_20d"]
 
 COLUMNS = ["ticker", "date", *FEATURE_COLUMNS, *TARGET_COLUMNS]
-
-
-def collapse_to_days(minutes: pd.DataFrame) -> pd.DataFrame:
-    """One bar per ticker per New York trading day.
-
-    The table stores every minute. Treating 9:31 and 9:32 as two lessons
-    would teach the forest the same day over and over.
-    """
-    empty = pd.DataFrame(columns=["ticker", "date", "open", "high", "low", "close", "volume"])
-    if minutes.empty:
-        return empty
-    frame = minutes.copy()
-    stamps = pd.to_datetime(frame["timestamp"], utc=True)
-    # The session is defined in New York. Regular-session bars fall on that date.
-    frame["date"] = stamps.dt.tz_convert("America/New_York").dt.strftime("%Y-%m-%d")
-    frame = frame.sort_values(["ticker", "timestamp"])
-    return frame.groupby(["ticker", "date"], as_index=False).agg(
-        open=("open", "first"),
-        high=("high", "max"),
-        low=("low", "min"),
-        close=("close", "last"),
-        volume=("volume", "sum"),
-    )
 
 
 def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
@@ -111,11 +90,13 @@ def _one_ticker(group: pd.DataFrame) -> pd.DataFrame:
 
 
 def engineer(daily: pd.DataFrame) -> pd.DataFrame:
-    """Build the model table from daily bars.
+    """Build the model table from ``daily_prices`` rows.
 
-    A row missing any feature is dropped. The early days have no 50-day
-    average yet, so they cannot be used. A row missing a future target
-    stays, because that is the row we can still forecast from.
+    ``daily`` has ticker, date, open, high, low, close, and volume.
+    pandas makes the rolling windows. A row missing any feature is dropped.
+    The early days have no 50-day average yet, so they cannot be used.
+    A row missing a future target stays, because that is the row we can
+    still forecast from.
     """
     if daily.empty:
         return pd.DataFrame(columns=COLUMNS)
@@ -127,19 +108,25 @@ def engineer(daily: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_daily_bars(db_path: str | Path) -> pd.DataFrame:
-    """Read 1-minute bars and collapse them. This does not take the writer lock."""
+    """Read ``daily_prices`` with pandas. Minute bars are not selected.
+
+    This does not take the writer lock. The date stays YYYY-MM-DD.
+    """
     query = """
-        SELECT ticker, timestamp, open, high, low, close, volume
-        FROM historical_prices
-        WHERE interval = '1m'
-        ORDER BY ticker, timestamp
+        SELECT ticker, date, open, high, low, close, volume
+        FROM daily_prices
+        ORDER BY ticker, date
     """
     connection = connect(db_path)
     try:
-        minutes = pd.read_sql_query(query, connection)
+        # Plain pandas read of the daily table. One row is already one day.
+        daily = pd.read_sql_query(query, connection)
     finally:
         connection.close()
-    return collapse_to_days(minutes)
+    if daily.empty:
+        return pd.DataFrame(columns=["ticker", "date", "open", "high", "low", "close", "volume"])
+    daily["date"] = daily["date"].astype(str).str.slice(0, 10)
+    return daily
 
 
 def build_feature_frame(db_path: str | Path) -> pd.DataFrame:

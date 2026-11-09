@@ -1,5 +1,6 @@
 -- Stage 1 local schema.
--- UTC timestamps are ISO-8601 text: YYYY-MM-DDTHH:MM:SSZ.
+-- Minute bars use UTC timestamps: YYYY-MM-DDTHH:MM:SSZ.
+-- Daily bars use a calendar date: YYYY-MM-DD. They are a separate table.
 -- The connection helper enables WAL and foreign keys. This script does not
 -- download data or start a scheduler.
 
@@ -45,6 +46,26 @@ CREATE INDEX IF NOT EXISTS idx_historical_prices_ticker_timestamp
 
 CREATE INDEX IF NOT EXISTS idx_historical_prices_interval
     ON historical_prices (interval);
+
+-- One row per ticker per trading day. Models train on this table.
+-- The 365-day delete applies to historical_prices only, not to these rows.
+CREATE TABLE IF NOT EXISTS daily_prices (
+    id INTEGER PRIMARY KEY,
+    ticker TEXT NOT NULL CHECK (length(ticker) > 0),
+    date TEXT NOT NULL
+        CHECK (date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume INTEGER NOT NULL CHECK (volume >= 0),
+    UNIQUE (ticker, date),
+    CHECK (high >= low AND open >= low AND open <= high AND close >= low AND close <= high),
+    FOREIGN KEY (ticker) REFERENCES stocks (symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_prices_ticker_date
+    ON daily_prices (ticker, date);
 
 CREATE TABLE IF NOT EXISTS portfolio_holdings (
     id INTEGER PRIMARY KEY,

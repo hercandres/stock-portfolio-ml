@@ -6,9 +6,7 @@ database/stock_market.db.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -20,8 +18,8 @@ from machine_learning.supervised.random_forest.features import (
     FEATURE_COLUMNS,
     TARGET_COLUMNS,
     build_and_save,
-    collapse_to_days,
     engineer,
+    load_daily_bars,
 )
 from machine_learning.supervised.random_forest.train import (
     FEATURES,
@@ -35,7 +33,6 @@ from machine_learning.supervised.random_forest.train import (
     train_and_save,
 )
 
-NY = ZoneInfo("America/New_York")
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -55,30 +52,37 @@ def _prices(days: int, ticker: str = "TEST1", start: float = 50.0) -> pd.DataFra
     )
 
 
-def test_minutes_collapse_to_one_row_per_day() -> None:
-    minutes = pd.DataFrame(
-        {
-            "ticker": ["TEST1", "TEST1", "TEST1"],
-            "timestamp": [
-                "2026-11-04T14:30:00Z",
-                "2026-11-04T14:31:00Z",
-                "2026-11-05T14:30:00Z",
-            ],
-            "open": [10.0, 11.0, 20.0],
-            "high": [10.5, 11.5, 20.5],
-            "low": [9.5, 10.5, 19.5],
-            "close": [10.2, 11.2, 20.2],
-            "volume": [1, 2, 4],
-        }
-    )
-    daily = collapse_to_days(minutes)
-    assert list(daily["date"]) == ["2026-11-04", "2026-11-05"]
-    first = daily.iloc[0]
-    assert first["open"] == 10.0
-    assert first["close"] == 11.2
-    assert first["high"] == 11.5
-    assert first["low"] == 9.5
-    assert first["volume"] == 3
+def test_features_read_daily_prices_and_ignore_minute_bars(tmp_path: Path) -> None:
+    db_path = tmp_path / "synthetic_daily_features.db"
+    initialize_database(db_path)
+    with get_connection(db_path) as connection:
+        with transaction(connection):
+            connection.execute(
+                """
+                INSERT INTO stocks (symbol, company_name, is_monitored, created_at)
+                VALUES ('TEST1', 'Synthetic Fixture', 1, '2026-01-01T00:00:00Z')
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO historical_prices (
+                    ticker, timestamp, open, high, low, close, volume, interval
+                ) VALUES (
+                    'TEST1', '2026-11-04T14:31:00Z', 99, 99, 99, 99, 1, '1m'
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO daily_prices (
+                    ticker, date, open, high, low, close, volume
+                ) VALUES ('TEST1', '2026-11-04', 10, 11, 9, 10.5, 7)
+                """
+            )
+    daily = load_daily_bars(db_path)
+    assert list(daily["date"]) == ["2026-11-04"]
+    assert float(daily.iloc[0]["close"]) == 10.5
+    assert "timestamp" not in daily.columns
 
 
 def test_engineer_drops_incomplete_features_and_keeps_open_targets() -> None:
@@ -184,20 +188,18 @@ def test_comparison_replaces_only_random_forest_rows(tmp_path: Path) -> None:
     assert set(forest["mae"]) == {0.4}
 
 
-def _seed_minutes(db_path: Path) -> None:
+def _seed_daily(db_path: Path) -> None:
+    """Synthetic daily_prices rows. These are not market data."""
     initialize_database(db_path)
     dates = pd.bdate_range("2025-06-02", periods=120)
     rows = []
     for offset, ticker in ((0, "TEST1"), (15, "TEST2")):
         for index, day in enumerate(dates):
             close = 40 + offset + index * 0.15 + (index % 5)
-            stamp = datetime(day.year, day.month, day.day, 15, 0, tzinfo=NY).astimezone(
-                timezone.utc
-            )
             rows.append(
                 (
                     ticker,
-                    stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    day.strftime("%Y-%m-%d"),
                     close - 0.4,
                     close + 0.8,
                     close - 0.8,
@@ -217,9 +219,9 @@ def _seed_minutes(db_path: Path) -> None:
                 )
             connection.executemany(
                 """
-                INSERT INTO historical_prices (
-                    ticker, timestamp, open, high, low, close, volume, interval
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, '1m')
+                INSERT INTO daily_prices (
+                    ticker, date, open, high, low, close, volume
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -227,7 +229,7 @@ def _seed_minutes(db_path: Path) -> None:
 
 def test_train_writes_files_and_database_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "synthetic_forest.db"
-    _seed_minutes(db_path)
+    _seed_daily(db_path)
     export = tmp_path / "random_forest_features.csv"
     output = tmp_path / "outputs"
     build_and_save(db_path, export)
@@ -298,7 +300,9 @@ def test_all_scores_pool_every_row_and_measure_stock_spread() -> None:
 
 def test_dashboard_explains_the_forest_and_does_not_rank_missing_models() -> None:
     text = (ROOT / "app" / "dashboard.py").read_text(encoding="utf-8")
-    assert 'st.button("RUN RANDOM FOREST")' in text
+    assert 'st.button("Run model")' in text
+    assert "_train_forest_once" in text
+    assert "UPDATE MARKET DATA" not in text
     assert "This is a model estimate, not a trade." in text
     assert '["All", *symbols]' in text
     assert 'st.subheader(f"This stock: {symbol}")' in text

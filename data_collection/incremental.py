@@ -23,7 +23,7 @@ from typing import Protocol
 from database.connection import (
     UTC_TIMESTAMP_FORMAT,
     get_connection,
-    insert_historical_prices_ignoring_duplicates,
+    insert_completed_minute_bars,
 )
 from database.initialize import DEFAULT_DB_PATH, initialize_database
 
@@ -181,7 +181,7 @@ def _sync_symbol(
         )
     try:
         with get_connection(db_path) as connection:
-            inserted = insert_historical_prices_ignoring_duplicates(
+            inserted = insert_completed_minute_bars(
                 connection,
                 [bar.as_row() for bar in fetched.bars],
             )

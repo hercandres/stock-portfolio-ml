@@ -13,11 +13,13 @@ import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 UTC_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+UTC_DATE_FORMAT = "%Y-%m-%d"
 _UTC_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_UTC_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _INSERT_PRICE_SQL = """
 INSERT INTO historical_prices (
@@ -29,6 +31,19 @@ _INSERT_PRICE_IGNORE_SQL = """
 INSERT OR IGNORE INTO historical_prices (
     ticker, timestamp, open, high, low, close, volume, interval
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+# A second download of the same day refreshes the open, high, low, close, and volume.
+_UPSERT_DAILY_SQL = """
+INSERT INTO daily_prices (
+    ticker, date, open, high, low, close, volume
+) VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(ticker, date) DO UPDATE SET
+    open = excluded.open,
+    high = excluded.high,
+    low = excluded.low,
+    close = excluded.close,
+    volume = excluded.volume
 """
 
 # Serializes writers inside this process. SQLite still enforces one writer
@@ -49,6 +64,23 @@ def ensure_utc_timestamp(value: str) -> str:
         )
     datetime.strptime(value, UTC_TIMESTAMP_FORMAT)
     return value
+
+
+def ensure_utc_date(value: str) -> str:
+    """Return value when it is a real calendar date, YYYY-MM-DD."""
+    if not isinstance(value, str) or _UTC_DATE_RE.fullmatch(value) is None:
+        raise ValueError("date must be text in the form YYYY-MM-DD")
+    datetime.strptime(value, UTC_DATE_FORMAT)
+    return value
+
+
+def timestamp_days_earlier(timestamp: str, days: int) -> str:
+    """Same clock time, ``days`` earlier. Used to drop a minute from one year ago."""
+    if days < 0:
+        raise ValueError("days must be zero or positive")
+    started = datetime.strptime(ensure_utc_timestamp(timestamp), UTC_TIMESTAMP_FORMAT)
+    started = started.replace(tzinfo=timezone.utc)
+    return (started - timedelta(days=days)).strftime(UTC_TIMESTAMP_FORMAT)
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
@@ -140,20 +172,78 @@ def insert_historical_prices_ignoring_duplicates(
         return int(connection.total_changes - before)
 
 
+def insert_completed_minute_bars(
+    connection: sqlite3.Connection,
+    rows: Sequence[Sequence[object]],
+) -> int:
+    """Insert 1-minute bars, then drop each ticker's bar from 365 days earlier.
+
+    A new minute replaces the minute from one year ago, so
+    ``historical_prices`` stays about one year long. Rows that are already
+    stored are left alone, and their older partner is not deleted again.
+    ``daily_prices`` is a different table and is not touched.
+    """
+    normalized = [_normalize_price_row(row) for row in rows]
+    payload = tuple(sorted(normalized, key=lambda item: (item[0], item[1])))
+    if not payload:
+        return 0
+    inserted = 0
+    with transaction(connection):
+        for row in payload:
+            ticker, timestamp, _open, _high, _low, _close, _volume, interval = row
+            before = connection.total_changes
+            connection.execute(_INSERT_PRICE_IGNORE_SQL, row)
+            if connection.total_changes == before:
+                continue
+            inserted += 1
+            # Only the rolling minute table loses the bar from one year ago.
+            if interval != "1m":
+                continue
+            year_ago = timestamp_days_earlier(timestamp, 365)
+            connection.execute(
+                """
+                DELETE FROM historical_prices
+                WHERE ticker = ? AND interval = '1m' AND timestamp = ?
+                """,
+                (ticker, year_ago),
+            )
+    return inserted
+
+
+def insert_daily_prices(
+    connection: sqlite3.Connection,
+    rows: Sequence[Sequence[object]],
+) -> int:
+    """Insert or refresh daily bars. Each row is ticker, date, open, high, low, close, volume.
+
+    The date is one trading day, YYYY-MM-DD. The same ticker and date updates
+    the prices instead of adding a second row. Minute bars are not written here.
+    """
+    payload = tuple(_normalize_daily_row(row) for row in rows)
+    if not payload:
+        return 0
+    with transaction(connection):
+        connection.executemany(_UPSERT_DAILY_SQL, payload)
+    return len(payload)
+
+
 def delete_historical_prices_before(
     connection: sqlite3.Connection,
     cutoff: str,
 ) -> int:
-    """Delete ``historical_prices`` rows strictly older than ``cutoff``.
+    """Delete 1-minute rows strictly older than ``cutoff``.
 
     Rows at the cutoff and rows newer than the cutoff stay. ``cutoff`` uses
-    the same UTC text format as stored timestamps. The delete is limited to
-    ``historical_prices``.
+    the same UTC text format as stored minute timestamps. Daily bars live in
+    ``daily_prices`` and this delete does not read that table.
     """
     cutoff_text = ensure_utc_timestamp(cutoff)
     with transaction(connection):
         connection.execute(
-            "DELETE FROM historical_prices WHERE timestamp < ?",
+            """
+            DELETE FROM historical_prices
+            WHERE interval = '1m' AND timestamp < ?
+            """,
             (cutoff_text,),
         )
         deleted = int(connection.execute("SELECT changes()").fetchone()[0])
@@ -188,6 +278,35 @@ def database_file_size(db_path: str | Path) -> int:
     if not path.is_file():
         raise FileNotFoundError(f"database file not found: {path}")
     return path.stat().st_size
+
+
+def _normalize_daily_row(
+    row: Sequence[object],
+) -> tuple[str, str, float, float, float, float, int]:
+    if len(row) != 7:
+        raise ValueError(
+            "a daily price row must have ticker, date, open, high, low, close, and volume"
+        )
+    ticker, trading_date, open_, high, low, close, volume = row
+    if not isinstance(trading_date, str):
+        raise ValueError("date must be text in the form YYYY-MM-DD")
+    open_price = _price(open_, "open")
+    high_price = _price(high, "high")
+    low_price = _price(low, "low")
+    close_price = _price(close, "close")
+    if high_price < low_price or open_price < low_price or open_price > high_price:
+        raise ValueError("daily open and high must sit inside the low-high range")
+    if close_price < low_price or close_price > high_price:
+        raise ValueError("daily close must sit inside the low-high range")
+    return (
+        _required_text(ticker, "ticker"),
+        ensure_utc_date(trading_date),
+        open_price,
+        high_price,
+        low_price,
+        close_price,
+        _volume(volume),
+    )
 
 
 def _normalize_price_row(
