@@ -3,8 +3,9 @@
 Run with ``python -m streamlit run app/dashboard.py``. The Start Portfolio
 window owns the live IEX session. While that window is open, minute bars
 append about once a minute and a finished day is written to daily prices.
-This process only reads SQLite. Random forest and XGBoost each train once
-when the dashboard session starts, and again only from their own buttons.
+This process only reads SQLite. Random forest, XGBoost, linear regression,
+K-Means, and PCA each run once when the dashboard session starts, and again
+only from their own buttons.
 """
 
 from __future__ import annotations
@@ -46,10 +47,13 @@ PAGE_STOCK = "Stock"
 PAGE_DATABASE = "Database"
 PAGE_FOREST = "Random Forest"
 PAGE_XGBOOST = "XGBoost"
+PAGE_LINEAR = "Linear Regression"
+PAGE_KMEANS = "K-Means"
+PAGE_PCA = "PCA"
 # The first three stay at the top of the sidebar. A new model is added to
 # ML_PAGES, so it shows under ML Methods and does not move those three.
 MAIN_PAGES = (PAGE_PORTFOLIO, PAGE_STOCK, PAGE_DATABASE)
-ML_PAGES = (PAGE_FOREST, PAGE_XGBOOST)
+ML_PAGES = (PAGE_FOREST, PAGE_XGBOOST, PAGE_LINEAR, PAGE_KMEANS, PAGE_PCA)
 
 FOREST_EXPORT = ROOT / "machine_learning" / "exports" / "random_forest_features.csv"
 FOREST_PREDICTIONS = ROOT / "machine_learning" / "outputs" / "predictions.csv"
@@ -58,6 +62,14 @@ FOREST_COMPARISON = ROOT / "machine_learning" / "outputs" / "model_comparison.cs
 # XGBoost reads FOREST_EXPORT. Its scores live in their own folder.
 XGB_PREDICTIONS = ROOT / "machine_learning" / "outputs" / "xgboost" / "predictions.csv"
 XGB_BACKTEST = ROOT / "machine_learning" / "outputs" / "xgboost" / "backtest.csv"
+# Linear regression reads FOREST_EXPORT too. Its scores live in their own folder.
+LINEAR_OUTPUT = ROOT / "machine_learning" / "outputs" / "linear_regression"
+LINEAR_PREDICTIONS = LINEAR_OUTPUT / "predictions.csv"
+LINEAR_BACKTEST = LINEAR_OUTPUT / "backtest.csv"
+# K-Means reads FOREST_EXPORT too. Labels and centers live in their own folder.
+KMEANS_OUTPUT = ROOT / "machine_learning" / "outputs" / "kmeans"
+# PCA reads FOREST_EXPORT too. Variance and loadings live in their own folder.
+PCA_OUTPUT = ROOT / "machine_learning" / "outputs" / "pca"
 
 
 def _sidebar_page() -> str:
@@ -116,10 +128,15 @@ def render(db_path: Path) -> None:
         "and a finished day is saved with the daily bars. "
         "The left chart button is daily prices. The right button is the last year of minutes. "
         "Closed nights, weekends, and holidays are left off both charts. "
-        "Random forest and XGBoost train on the daily bars."
+        "Random forest, XGBoost, and linear regression train on the daily bars. "
+        "K-Means groups those same days. "
+        "PCA summarizes those same days."
     )
     _train_forest_once(db_path)
     _train_xgboost_once(db_path)
+    _train_linear_once(db_path)
+    _train_kmeans_once(db_path)
+    _train_pca_once(db_path)
     if page == PAGE_PORTFOLIO:
         _portfolio_page(db_path)
     elif page == PAGE_STOCK:
@@ -128,6 +145,12 @@ def render(db_path: Path) -> None:
         _random_forest_page(db_path)
     elif page == PAGE_XGBOOST:
         _xgboost_page(db_path)
+    elif page == PAGE_LINEAR:
+        _linear_regression_page(db_path)
+    elif page == PAGE_KMEANS:
+        _kmeans_page(db_path)
+    elif page == PAGE_PCA:
+        _pca_page(db_path)
     else:
         _database_page(db_path, now)
 
@@ -842,6 +865,731 @@ def _xgboost_page(db_path: Path) -> None:
         _forest_metrics(symbol, horizon, XGB_BACKTEST)
         _forest_forecast(symbol, horizon, XGB_PREDICTIONS)
     _forest_comparison_table("xgboost")
+
+
+def _train_linear_once(db_path: Path) -> None:
+    """Fit the three lines the first time this dashboard session starts."""
+    if st.session_state.get("linear_ran"):
+        return
+    st.session_state["linear_ran"] = True
+    _train_linear(db_path)
+
+
+def _train_linear(db_path: Path) -> None:
+    """Fit three LinearRegression models on the shared feature CSV.
+
+    This does not write a second feature file and it does not replace
+    other models' rows in the comparison file. The inputs are not standardized.
+    """
+    with st.spinner("Fitting linear regression on the shared daily feature file..."):
+        from machine_learning.supervised.linear_regression.train import train_and_save
+
+        try:
+            train_and_save(db_path)
+        except Exception:
+            st.error("Linear regression did not finish. No secret was printed.")
+
+
+def _linear_explanation() -> None:
+    st.subheader("How the rows are built")
+    st.markdown(
+        "Linear regression reads the same file as the random forest: "
+        "**random_forest_features.csv**. That file is built from **daily_prices**, "
+        "one row per stock per trading day. There is no second feature file. "
+        "The nine inputs are **return_1d**, **return_5d**, **return_20d**, "
+        "**dist_sma_20_pct**, **dist_sma_50_pct**, **rsi_14**, **volatility_20d**, "
+        "**volume_vs_20d**, and **range_pct**. They describe a day that has "
+        "already finished. The numbers are not rescaled."
+    )
+    st.markdown(
+        "The targets are **target_1d**, **target_5d**, and **target_20d**: the "
+        "percent change 1, 5, and 20 trading days ahead. Those are the answers. "
+        "The line is not given them as inputs. The ticker and the date only "
+        "name the row. A day missing a feature is left out. A recent day that "
+        "does not yet have a 20-day future stays in the file, so the line "
+        "can still forecast from it. That row is not used as an answer."
+    )
+    st.subheader("How the line learns")
+    st.markdown(
+        "Linear regression draws one straight line through the inputs. "
+        "Each input gets a coefficient, which is its weight in that line. "
+        "The library model is **LinearRegression**. There are three lines, "
+        "because the next day, the next 5 days, and the next 20 days are "
+        "different questions. Earlier days teach the line. Later days of the "
+        "same stock are the score. The rows are not shuffled. A shuffle would "
+        "let the model study a day that had not happened yet."
+    )
+    st.markdown(
+        "The first chart sorts the held-out guesses and cuts them into up to "
+        "10 bins with the same number of days. Each point is that bin's average "
+        "guess and its average actual move. A straight line runs through those "
+        "averages. **y = x** would be a perfect match. One stock is used when "
+        "it has at least 30 held-out days. Otherwise the bins use every stock, "
+        "and the caption says so. The chart under that is one stock across the "
+        "held-out dates: the actual percent and the predicted percent. All "
+        "shows the first ticker in the held-out set and names it. "
+        "Pearson correlation says how each input moved with the target on the "
+        "training rows. The coefficient is the fitted weight. Those two columns "
+        "are different numbers. The table puts the strongest absolute correlation "
+        "first. MAE is the average size of the miss, in percentage points. RMSE "
+        "counts a large error more heavily. Directional accuracy is how often "
+        "the guess and the real move had the same sign. All scores every held-out "
+        "day and shows the mean, the standard deviation across stocks, and the "
+        "normal chart. The comparison file at the bottom shows the "
+        "linear_regression rows and does not follow the dropdown."
+    )
+
+
+def _linear_calibration_bins(rows, bins: int = 10):
+    """Sort by the guess and cut into equal-count bins.
+
+    Each returned row is one bin's average guess and average actual move.
+    Ten is the most bins. Fewer held-out days means fewer bins.
+    """
+    import pandas as pd
+
+    empty = pd.DataFrame(columns=["mean_predicted", "mean_actual", "rows"])
+    if rows is None or len(rows) == 0:
+        return empty
+    ordered = rows.sort_values("predicted_percent", kind="mergesort").reset_index(drop=True)
+    count = min(int(bins), len(ordered))
+    base, extra = divmod(len(ordered), count)
+    records = []
+    start = 0
+    for index in range(count):
+        # The first leftover days go one each into the earliest bins.
+        size = base + (1 if index < extra else 0)
+        group = ordered.iloc[start:start + size]
+        start += size
+        records.append(
+            {
+                "mean_predicted": float(group["predicted_percent"].mean()),
+                "mean_actual": float(group["actual_percent"].mean()),
+                "rows": int(len(group)),
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def _linear_calibration_choice(symbol: str, everyone):
+    """Rows for the bins. A stock is used only when it has at least 30 days."""
+    if symbol == "All" or everyone is None or len(everyone) == 0:
+        return everyone, ""
+    one = everyone[everyone["ticker"].astype(str) == str(symbol)]
+    if len(one) >= 30:
+        return one, ""
+    note = (
+        f"{symbol} has {len(one)} held-out days, fewer than 30, "
+        "so these bins use every stock."
+    )
+    return everyone, note
+
+
+def _linear_time_choice(symbol: str, everyone):
+    """One ticker's held-out days. All uses the first ticker in the set."""
+    if everyone is None or len(everyone) == 0:
+        return everyone, symbol
+    ordered = everyone.sort_values(["ticker", "date"])
+    if symbol == "All":
+        chosen = str(ordered["ticker"].iloc[0])
+    else:
+        chosen = str(symbol)
+    rows = ordered[ordered["ticker"].astype(str) == chosen]
+    return rows, chosen
+
+
+def _linear_calibration_chart(symbol: str, horizon: str) -> None:
+    """Bin averages of held-out guesses against what those days actually did."""
+    import numpy as np
+    import plotly.graph_objects as go
+
+    everyone = _held_out_rows("All", horizon, LINEAR_BACKTEST)
+    st.subheader("Calibration")
+    if everyone is None:
+        st.info("The model has not scored the held-out days yet.")
+        return
+    if everyone.empty:
+        st.info("There are no held-out days for that horizon.")
+        return
+    rows, note = _linear_calibration_choice(symbol, everyone)
+    means = _linear_calibration_bins(rows)
+    if note:
+        st.caption(note)
+    elif symbol == "All":
+        st.caption(
+            f"Held-out days for the {horizon}-day horizon, every stock. "
+            "Each point is a bin average."
+        )
+    else:
+        st.caption(
+            f"Held-out days for {symbol}, {horizon} trading days. "
+            "Each point is a bin average."
+        )
+    predicted = means["mean_predicted"]
+    actual = means["mean_actual"]
+    low = float(min(predicted.min(), actual.min()))
+    high = float(max(predicted.max(), actual.max()))
+    if low == high:
+        low -= 1.0
+        high += 1.0
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=predicted,
+            y=actual,
+            mode="markers",
+            name="Bin average",
+        )
+    )
+    # One straight line through the bin averages, plus the perfect y = x line.
+    if len(means) >= 2:
+        slope, intercept = np.polyfit(
+            predicted.to_numpy(dtype=float),
+            actual.to_numpy(dtype=float),
+            1,
+        )
+        x0 = float(predicted.min())
+        x1 = float(predicted.max())
+        figure.add_trace(
+            go.Scatter(
+                x=[x0, x1],
+                y=[float(slope * x0 + intercept), float(slope * x1 + intercept)],
+                mode="lines",
+                name="Line through bins",
+            )
+        )
+    figure.add_trace(
+        go.Scatter(
+            x=[low, high],
+            y=[low, high],
+            mode="lines",
+            name="y = x",
+            line=dict(color="#1f4e79", width=2),
+        )
+    )
+    figure.update_layout(
+        title=f"Bin averages: mean predicted vs mean actual, {horizon} trading days",
+        xaxis_title="Mean predicted percent",
+        yaxis_title="Mean actual percent",
+        height=420,
+        margin=dict(l=40, r=20, t=50, b=40),
+        legend=dict(orientation="h"),
+    )
+    st.plotly_chart(figure, width="stretch")
+
+
+def _linear_time_chart(symbol: str, horizon: str) -> None:
+    """Held-out actual and predicted percent for one stock, by date."""
+    import plotly.graph_objects as go
+
+    everyone = _held_out_rows("All", horizon, LINEAR_BACKTEST)
+    st.subheader("Held-out days")
+    if everyone is None:
+        st.info("The model has not scored the held-out days yet.")
+        return
+    if everyone.empty:
+        st.info("There are no held-out days for that horizon.")
+        return
+    rows, chosen = _linear_time_choice(symbol, everyone)
+    if rows is None or rows.empty:
+        st.info("This stock has no held-out days for that horizon.")
+        return
+    if symbol == "All":
+        st.caption(
+            f"All is selected, so this chart uses {chosen}, "
+            "the first ticker in the held-out set."
+        )
+    else:
+        st.caption(f"Held-out days for {chosen}.")
+    figure = go.Figure()
+    figure.add_trace(
+        go.Scatter(
+            x=rows["date"],
+            y=rows["actual_percent"],
+            name="Actual",
+            mode="lines",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=rows["date"],
+            y=rows["predicted_percent"],
+            name="Predicted",
+            mode="lines",
+        )
+    )
+    figure.update_layout(
+        title=f"{chosen}: held-out actual and predicted percent, {horizon} trading days",
+        xaxis_title="Date",
+        yaxis_title="Percent",
+        height=420,
+        margin=dict(l=40, r=20, t=50, b=40),
+        legend=dict(orientation="h"),
+    )
+    st.plotly_chart(figure, width="stretch")
+
+
+def _linear_number(value: object) -> str:
+    """Three decimals, or n/a when a constant input has no correlation."""
+    import pandas as pd
+
+    if pd.isna(value):
+        return "n/a"
+    return f"{float(value):.3f}"
+
+
+def _linear_relationship_table(horizon: str) -> None:
+    """Each input's Pearson correlation beside its fitted coefficient."""
+    import pandas as pd
+
+    table = _read_table(LINEAR_OUTPUT / "coefficients.csv")
+    st.subheader("Inputs and the line")
+    st.caption(
+        "Pearson correlation is how each input moved with this horizon's target "
+        "on the training rows. The coefficient is that input's weight in the "
+        "fitted line. They are different numbers. The strongest absolute "
+        "correlation is first."
+    )
+    if table is None or table.empty or "pearson_correlation" not in table.columns:
+        st.info("Linear regression has not saved coefficients yet.")
+        return
+    chosen = table[table["horizon"].astype(str) == str(horizon)].copy()
+    if chosen.empty:
+        st.info("Linear regression has not saved coefficients yet.")
+        return
+    chosen["abs_correlation"] = chosen["pearson_correlation"].abs()
+    chosen = chosen.sort_values(
+        ["abs_correlation", "feature"],
+        ascending=[False, True],
+        na_position="last",
+    )
+    show = {
+        "Feature": [str(value) for value in chosen["feature"]],
+        "Pearson correlation": [
+            _linear_number(value) for value in chosen["pearson_correlation"]
+        ],
+        "Coefficient": [_linear_number(value) for value in chosen["coefficient"]],
+    }
+    st.table(pd.DataFrame(show))
+
+
+def _linear_regression_page(db_path: Path) -> None:
+    st.header("Linear Regression")
+    st.caption(
+        "The same daily feature file as the random forest. "
+        "The line is LinearRegression. The inputs are not standardized. "
+        "It already ran when the app opened."
+    )
+    symbols = _forest_symbols(db_path)
+    symbol = st.selectbox("Stock", ["All", *symbols], key="linear-stock")
+    st.caption("All uses every stock. A ticker uses only that stock.")
+    horizon = st.selectbox(
+        "Horizon",
+        ["1", "5", "20"],
+        format_func=lambda value: f"{value} trading days",
+        key="linear-horizon",
+    )
+    if st.button("Run Linear Regression"):
+        _train_linear(db_path)
+        st.rerun()
+    _linear_explanation()
+    _linear_calibration_chart(symbol, horizon)
+    _linear_time_chart(symbol, horizon)
+    if symbol == "All":
+        _forest_all_metrics(horizon, LINEAR_BACKTEST)
+        _forest_normal_chart(horizon, LINEAR_BACKTEST)
+    else:
+        _forest_metrics(symbol, horizon, LINEAR_BACKTEST)
+        _forest_forecast(symbol, horizon, LINEAR_PREDICTIONS)
+    _linear_relationship_table(horizon)
+    _forest_comparison_table("linear_regression")
+
+
+def _train_kmeans_once(db_path: Path) -> None:
+    """Group the daily feature rows the first time this dashboard session starts."""
+    if st.session_state.get("kmeans_ran"):
+        return
+    st.session_state["kmeans_ran"] = True
+    _train_kmeans(db_path)
+
+
+def _train_kmeans(db_path: Path) -> None:
+    """Standardize the shared feature file and keep the best k.
+
+    This does not write a second feature file and it does not add a
+    comparison row.
+    """
+    with st.spinner("Standardizing the daily features and choosing k..."):
+        from machine_learning.unsupervised.kmeans.train import train_and_save
+
+        try:
+            train_and_save(db_path)
+        except Exception:
+            st.error("K-Means did not finish. No secret was printed.")
+
+
+def _kmeans_explanation() -> None:
+    st.subheader("How the rows are built")
+    st.markdown(
+        "K-Means reads the same file as the random forest: "
+        "**random_forest_features.csv**. That file is built from **daily_prices**, "
+        "one row per stock per trading day. There is no second feature file. "
+        "The nine inputs are **return_1d**, **return_5d**, **return_20d**, "
+        "**dist_sma_20_pct**, **dist_sma_50_pct**, **rsi_14**, **volatility_20d**, "
+        "**volume_vs_20d**, and **range_pct**. The ticker and the date only name "
+        "the row."
+    )
+    st.markdown(
+        "Those nine numbers are not on the same scale. **rsi_14** sits between "
+        "0 and 100. A one-day return is a percent, often near zero. K-Means "
+        "groups days by distance, so a wide scale would dominate the groups. "
+        "**StandardScaler** subtracts each column's average and divides by its "
+        "spread before the groups are found. The random forest and XGBoost are "
+        "trees. They stay unscaled. Linear regression is a straight line on "
+        "those same unscaled numbers."
+    )
+    st.markdown(
+        "**target_1d**, **target_5d**, and **target_20d** are future percent "
+        "changes. They are not inputs. A day missing one of the nine inputs is "
+        "left out."
+    )
+    st.subheader("How the groups are chosen")
+    st.markdown(
+        "K-Means places each day into the nearest group. **k** is how many "
+        "groups to make. The run tries every k from 2 through 8. The silhouette "
+        "score is higher when a day is close to its own group and far from the "
+        "others. The highest score is kept. The library model is **KMeans**, "
+        "and the seed is 42 so a rerun on the same file stays put. Past 2,000 "
+        "rows, that score uses a fixed sample of 2,000 rows, with at least one "
+        "row from every group. The groups themselves still use every row."
+    )
+    st.markdown(
+        "The scatter draws each scaled day on the first two principal components. "
+        "Those two axes are only the chart. They are not a separate model. "
+        "The center table converts each group's center back to the original "
+        "units, such as RSI and percent return. The average future 1-day return "
+        "describes the days in a group. It is not a prediction score. This page "
+        "does not show a forecast error, and it does not add a row to the "
+        "comparison file."
+    )
+
+
+def _kmeans_silhouette_chart() -> None:
+    """Bar for each k. The kept k is the darker bar."""
+    import plotly.graph_objects as go
+
+    scores = _read_table(KMEANS_OUTPUT / "silhouette.csv")
+    summary = _read_table(KMEANS_OUTPUT / "summary.csv")
+    st.subheader("Silhouette scores")
+    st.caption(
+        "Higher means the groups were easier to tell apart. "
+        "The run keeps the highest score from k = 2 through 8."
+    )
+    if scores is None or scores.empty:
+        st.info("K-Means has not scored k yet.")
+        return
+    chosen = None
+    if summary is not None and not summary.empty and "chosen_k" in summary.columns:
+        chosen = int(summary["chosen_k"].iloc[0])
+        st.write(
+            f"Kept k = {chosen}. "
+            f"Silhouette = {float(summary['silhouette'].iloc[0]):.3f}."
+        )
+    colors = []
+    for k in scores["k"]:
+        if chosen is not None and int(k) == chosen:
+            colors.append("#1f4e79")
+        else:
+            colors.append("#9fb3c8")
+    figure = go.Figure(
+        go.Bar(
+            x=scores["k"],
+            y=scores["silhouette"],
+            marker_color=colors,
+            name="Silhouette",
+        )
+    )
+    figure.update_layout(
+        title="Silhouette score for k = 2 through 8",
+        xaxis_title="k",
+        yaxis_title="Silhouette",
+        height=420,
+        margin=dict(l=40, r=20, t=50, b=40),
+        showlegend=False,
+    )
+    st.plotly_chart(figure, width="stretch")
+
+
+def _kmeans_scatter() -> None:
+    """Scaled rows on two chart axes, colored by the group they joined."""
+    import plotly.graph_objects as go
+
+    rows = _read_table(KMEANS_OUTPUT / "assignments.csv")
+    st.subheader("Days by cluster")
+    if rows is None or rows.empty:
+        st.info("K-Means has not grouped the days yet.")
+        return
+    figure = go.Figure()
+    for cluster, group in rows.groupby("cluster", sort=True):
+        figure.add_trace(
+            go.Scattergl(
+                x=group["pc1"],
+                y=group["pc2"],
+                mode="markers",
+                name=f"Cluster {int(cluster)}",
+                marker=dict(size=4, opacity=0.55),
+            )
+        )
+    figure.update_layout(
+        title="Scaled days, colored by cluster",
+        xaxis_title="First principal component",
+        yaxis_title="Second principal component",
+        height=520,
+        margin=dict(l=40, r=20, t=50, b=40),
+        legend=dict(orientation="h"),
+    )
+    st.plotly_chart(figure, width="stretch")
+    st.caption(
+        "The first two principal components are only the chart axes, not a separate model."
+    )
+
+
+def _kmeans_size_table() -> None:
+    import pandas as pd
+
+    summary = _read_table(KMEANS_OUTPUT / "summary.csv")
+    st.subheader("Rows in each cluster")
+    if summary is None or summary.empty:
+        st.info("K-Means has not counted the clusters yet.")
+        return
+    show = {
+        "Cluster": [int(value) for value in summary["cluster"]],
+        "Rows": [int(value) for value in summary["rows"]],
+    }
+    st.table(pd.DataFrame(show))
+
+
+def _kmeans_center_table() -> None:
+    import pandas as pd
+
+    centers = _read_table(KMEANS_OUTPUT / "centers.csv")
+    st.subheader("Cluster centers")
+    st.caption("Each center is converted back to the original feature units.")
+    if centers is None or centers.empty:
+        st.info("K-Means has not saved centers yet.")
+        return
+    show = {"Cluster": [int(value) for value in centers["cluster"]]}
+    for column in centers.columns:
+        if column == "cluster":
+            continue
+        show[column] = [f"{float(value):.3f}" for value in centers[column]]
+    st.table(pd.DataFrame(show))
+
+
+def _kmeans_return_table() -> None:
+    import pandas as pd
+
+    summary = _read_table(KMEANS_OUTPUT / "summary.csv")
+    st.subheader("Average future 1-day return")
+    st.caption(
+        "This is the average of target_1d for the days in that cluster. "
+        "It describes those days. It is not a prediction score."
+    )
+    if summary is None or summary.empty or "mean_future_return_1d" not in summary.columns:
+        st.info("There is no future 1-day return to describe yet.")
+        return
+    values = []
+    for value in summary["mean_future_return_1d"]:
+        if pd.isna(value):
+            values.append("n/a")
+        else:
+            values.append(f"{float(value):.3f}")
+    show = {
+        "Cluster": [int(value) for value in summary["cluster"]],
+        "Average future 1-day return": values,
+    }
+    st.table(pd.DataFrame(show))
+
+
+def _kmeans_page(db_path: Path) -> None:
+    st.header("K-Means")
+    st.caption(
+        "The same daily feature file as the random forest. "
+        "The inputs are standardized, then grouped with KMeans. "
+        "It already ran when the app opened."
+    )
+    if st.button("Run K-Means"):
+        _train_kmeans(db_path)
+        st.rerun()
+    _kmeans_explanation()
+    _kmeans_silhouette_chart()
+    _kmeans_scatter()
+    _kmeans_size_table()
+    _kmeans_center_table()
+    _kmeans_return_table()
+
+
+def _train_pca_once(db_path: Path) -> None:
+    """Fit PCA on the daily feature rows the first time this dashboard session starts."""
+    if st.session_state.get("pca_ran"):
+        return
+    st.session_state["pca_ran"] = True
+    _train_pca(db_path)
+
+
+def _train_pca(db_path: Path) -> None:
+    """Standardize the shared feature file and keep every component.
+
+    This does not write a second feature file and it does not add a
+    comparison row.
+    """
+    with st.spinner("Standardizing the daily features and fitting PCA..."):
+        from machine_learning.unsupervised.pca.train import train_and_save
+
+        try:
+            train_and_save(db_path)
+        except Exception:
+            st.error("PCA did not finish. No secret was printed.")
+
+
+def _pca_explanation() -> None:
+    st.subheader("How the rows are built")
+    st.markdown(
+        "PCA reads the same file as the random forest: "
+        "**random_forest_features.csv**. That file is built from **daily_prices**, "
+        "one row per stock per trading day. There is no second feature file. "
+        "The nine inputs are **return_1d**, **return_5d**, **return_20d**, "
+        "**dist_sma_20_pct**, **dist_sma_50_pct**, **rsi_14**, **volatility_20d**, "
+        "**volume_vs_20d**, and **range_pct**. The ticker and the date only name "
+        "the row."
+    )
+    st.markdown(
+        "Those nine numbers are not on the same scale. **rsi_14** sits between "
+        "0 and 100. A one-day return is a percent, often near zero. "
+        "**StandardScaler** subtracts each column's average and divides by its "
+        "spread. PCA then looks for new directions in those scaled numbers. "
+        "The random forest, XGBoost, and linear regression stay unscaled."
+    )
+    st.markdown(
+        "**target_1d**, **target_5d**, and **target_20d** are future percent "
+        "changes. They are not inputs. A day missing one of the nine inputs is "
+        "left out."
+    )
+    st.subheader("How the components are found")
+    st.markdown(
+        "A component is a mix of the nine inputs. The first component is the "
+        "mix that carries the most variance. The next one carries the most of "
+        "what is left, and it is perpendicular to the first. The run keeps "
+        "every component, one for each input. The library model is **PCA**, "
+        "and the seed is 42 so a rerun on the same file stays put."
+    )
+    st.markdown(
+        "The bar shows how much of the variance each component carries. The "
+        "line adds those shares from the first component onward. The loadings "
+        "table is each original feature's weight on the first three components. "
+        "This page does not predict a future return. It does not show a "
+        "forecast error, and it does not add a row to the comparison file."
+    )
+
+
+def _pca_variance_bar() -> None:
+    """One bar per component. Taller means that component carries more variance."""
+    import plotly.graph_objects as go
+
+    table = _read_table(PCA_OUTPUT / "explained_variance.csv")
+    st.subheader("Explained variance")
+    st.caption("Each bar is the share of the standardized features that one component carries.")
+    if table is None or table.empty:
+        st.info("PCA has not measured the components yet.")
+        return
+    labels = [f"PC{int(value)}" for value in table["component"]]
+    percents = [float(value) * 100 for value in table["explained_variance_ratio"]]
+    figure = go.Figure(
+        go.Bar(
+            x=labels,
+            y=percents,
+            marker_color="#1f4e79",
+            name="Explained variance",
+        )
+    )
+    figure.update_layout(
+        title="Explained variance for each component",
+        xaxis_title="Component",
+        yaxis_title="Explained variance (%)",
+        height=420,
+        margin=dict(l=40, r=20, t=50, b=40),
+        showlegend=False,
+    )
+    st.plotly_chart(figure, width="stretch")
+    if len(table) >= 2:
+        first_two = float(table["cumulative_explained_variance"].iloc[1]) * 100
+        st.write(f"The first two components explain {first_two:.1f}% of the variance.")
+
+
+def _pca_cumulative_line() -> None:
+    """Running total of the variance shares, from the first component onward."""
+    import plotly.graph_objects as go
+
+    table = _read_table(PCA_OUTPUT / "explained_variance.csv")
+    st.subheader("Cumulative explained variance")
+    st.caption("Each point adds that component's share to the components before it.")
+    if table is None or table.empty:
+        st.info("PCA has not added up the variance yet.")
+        return
+    labels = [f"PC{int(value)}" for value in table["component"]]
+    percents = [float(value) * 100 for value in table["cumulative_explained_variance"]]
+    figure = go.Figure(
+        go.Scatter(
+            x=labels,
+            y=percents,
+            mode="lines+markers",
+            line=dict(color="#1f4e79", width=2),
+            name="Cumulative explained variance",
+        )
+    )
+    figure.update_layout(
+        title="Cumulative explained variance",
+        xaxis_title="Component",
+        yaxis_title="Cumulative explained variance (%)",
+        height=420,
+        margin=dict(l=40, r=20, t=50, b=40),
+        showlegend=False,
+    )
+    st.plotly_chart(figure, width="stretch")
+
+
+def _pca_loadings_table() -> None:
+    """Each original feature's weight on the first three components."""
+    import pandas as pd
+
+    loadings = _read_table(PCA_OUTPUT / "loadings.csv")
+    st.subheader("Loadings")
+    st.caption("A loading near 1 or -1 means that feature moves with that component.")
+    if loadings is None or loadings.empty:
+        st.info("PCA has not saved loadings yet.")
+        return
+    show = {"Feature": [str(value) for value in loadings["feature"]]}
+    for column, title in (("pc1", "PC1"), ("pc2", "PC2"), ("pc3", "PC3")):
+        if column not in loadings.columns:
+            continue
+        show[title] = [f"{float(value):.3f}" for value in loadings[column]]
+    st.table(pd.DataFrame(show))
+
+
+def _pca_page(db_path: Path) -> None:
+    st.header("PCA")
+    st.caption(
+        "The same daily feature file as the random forest. "
+        "The inputs are standardized, then summarized with PCA. "
+        "It already ran when the app opened."
+    )
+    if st.button("Run PCA"):
+        _train_pca(db_path)
+        st.rerun()
+    _pca_explanation()
+    _pca_variance_bar()
+    _pca_cumulative_line()
+    _pca_loadings_table()
 
 
 def _style() -> None:

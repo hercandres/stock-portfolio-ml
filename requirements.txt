@@ -8,7 +8,7 @@ websocket-client>=1.8
 streamlit>=1.39
 plotly>=5.22
 
-# Random forest and the shared feature table.
+# Random forest, the shared feature table, linear regression, K-Means, and PCA.
 pandas>=2.2
 numpy>=2.0
 scikit-learn>=1.5

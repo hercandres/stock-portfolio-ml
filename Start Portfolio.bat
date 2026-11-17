@@ -1,5 +1,5 @@
 @echo off
-cd /d "C:\Users\Personal\Desktop\Portfolio_ML"
+cd /d "%~dp0"
 title Start Portfolio
 echo Portfolio is starting.
 echo Close this window to stop the dashboard and market-data updates.

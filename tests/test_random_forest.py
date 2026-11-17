@@ -319,5 +319,5 @@ def test_dashboard_explains_the_forest_and_does_not_rank_missing_models() -> Non
     assert "XGBoost" not in forest_page
     assert "_forest_comparison_table()" in forest_page
     # Models that are not built are not named anywhere in the dashboard.
-    for name in ("LSTM", "K-Means", "Isolation Forest"):
+    for name in ("LSTM", "Isolation Forest"):
         assert name not in text

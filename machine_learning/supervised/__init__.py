@@ -1,1 +1,1 @@
-"""Supervised models. Random forest and XGBoost are built."""
+"""Supervised models. Random forest, XGBoost, and linear regression are built."""

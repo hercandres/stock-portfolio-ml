@@ -97,7 +97,7 @@ def test_xgboost_reads_the_shared_feature_file_and_not_a_second_csv() -> None:
         assert banned not in FEATURES
     dashboard = (ROOT / "app" / "dashboard.py").read_text(encoding="utf-8")
     assert 'PAGE_XGBOOST = "XGBoost"' in dashboard
-    assert "ML_PAGES = (PAGE_FOREST, PAGE_XGBOOST)" in dashboard
+    assert "ML_PAGES = (PAGE_FOREST, PAGE_XGBOOST, PAGE_LINEAR, PAGE_KMEANS, PAGE_PCA)" in dashboard
     assert 'st.button("Run XGBoost")' in dashboard
     assert "_train_xgboost_once" in dashboard
     assert "xgboost_features.csv" not in dashboard
